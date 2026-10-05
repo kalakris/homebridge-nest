@@ -20,7 +20,7 @@ Differences from upstream:
 * **Changes are pushed, not just polled.** Upstream's update path had become a no-op, so controllers only saw new
   values when they polled (every 60 s for Home Assistant). Values from the Nest observe stream now reach HomeKit
   within a second, including the current heating/cooling state.
-* **Stale data is reported as a fault.** If nothing has been heard from Nest (observe stream messages, REST
+* **Stale data is reported as a fault.** If nothing has been heard from Nest (observe stream data or keep-alive messages, REST
   responses, or HTTP/2 pings on the observe stream) for `staleDataTimeoutMinutes` (default 10), every characteristic
   read fails with *Service communication failure*, which Home Assistant shows as `unavailable`, and changes are refused.
   Upstream keeps serving the last values forever.

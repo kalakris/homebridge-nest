@@ -67,6 +67,23 @@ module.exports = async function() {
         assert.strictEqual(conn.writeBlockedReason(), null);
         conn.authPromise = null;
 
+        // Observe stream: data and keep-alive messages are contact, error statuses are not
+        {
+            const c = new Connection({}, silent, false, false);
+            for (let i = 0; i < 200 && !c.StreamBody; i++) {
+                await new Promise(resolve => setTimeout(resolve, 10));
+            }
+            const encode = obj => Buffer.from(c.StreamBody.encode(c.StreamBody.fromObject(obj)).finish());
+            const start = Date.now();
+            now += 60000;
+            c.decodeObserveMessage(encode({ status: { code: 13, message: 'internal' } }));
+            assert.strictEqual(c.lastContactTime, start, 'error status is not contact');
+            c.decodeObserveMessage(Buffer.from([0xff, 0xff, 0xff]));
+            assert.strictEqual(c.lastContactTime, start, 'undecodable message is not contact');
+            c.decodeObserveMessage(encode({ noop: [Buffer.from('x')] }));
+            assert.strictEqual(c.lastContactTime, now, 'keep-alive is contact');
+        }
+
         // staleDataTimeoutMinutes: 0 disables
         const never = new Connection({ staleDataTimeoutMinutes: 0 }, silent, false, false);
         now += 24 * 60 * 60 * 1000;

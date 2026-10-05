@@ -79,6 +79,28 @@ module.exports = async function() {
             assert.ok(!errors.some(line => /token|cookie/i.test(line)), 'no credentials in the log');
         }
 
+        // Not connected while a reauthentication is under way: pushed once it succeeds
+        {
+            const conn = makeConnection();
+            await waitForProto(conn);
+            conn.connected = false;
+            const requests = [];
+            axios.defaults.adapter = async config => {
+                requests.push(config.url);
+                return { data: Buffer.alloc(0), status: 200, statusText: 'OK', headers: {}, config: config };
+            };
+            conn.authPromise = Promise.resolve().then(() => {
+                conn.connected = true;
+                conn.authPromise = null;
+                return true;
+            });
+            conn.commitUpdate('shared.T1', { target_temperature_low: 21 }, 'range', true);
+            await conn.pushUpdates();
+            assert.strictEqual(requests.length, 1);
+            assert.strictEqual(conn.pendingUpdates.length, 0);
+            clearTimeout(conn.mergeEndTimer);
+        }
+
         // Not connected: dropped loudly rather than silently
         {
             errors.length = 0;
