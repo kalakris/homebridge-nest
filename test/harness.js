@@ -4,6 +4,9 @@
 // validation and wire rounding HomeKit controllers (Home Assistant) get.
 
 const hap = require('hap-nodejs');
+
+// index.js installs the Promise helpers (asCallback, delay) the accessories rely on
+require('../index.js');
 const { formatOutgoingCharacteristicValue } = require('hap-nodejs/dist/lib/util/request-util');
 
 class PlatformAccessory {
