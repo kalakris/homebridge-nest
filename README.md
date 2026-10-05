@@ -1,5 +1,36 @@
 # homebridge-nest
 
+## Fork notes (for Home Assistant users)
+
+This is [kalakris/homebridge-nest](https://github.com/kalakris/homebridge-nest), a fork of
+[chrisjshull/homebridge-nest](https://github.com/chrisjshull/homebridge-nest) 4.6.10 for people who bring Nest
+devices into **Home Assistant** (through its HomeKit Controller integration) or other automation, where measurement
+resolution, latency and honest failure reporting matter more than matching the Nest app. Versions are `4.6.10-ha.N`.
+Install with `npm install github:kalakris/homebridge-nest` (pin a commit with `#<sha>`).
+
+Differences from upstream:
+
+* **Measured temperatures are not rounded.** Upstream rounds every current temperature (thermostat, thermostat
+  backplate, Nest Temperature Sensors) to the Nest display unit: whole °F, or 0.5 °C. This fork reports the value the
+  Nest service sends, on a 0.01 °C grid (`minStep` 0.01; HAP-NodeJS rounds outgoing values to `minStep` and to 4
+  decimals). Humidity is reported to 0.01 % (upstream: whole %). Setpoints are unchanged (whole °F / 0.5 °C, which is
+  what the Nest accepts). The `"Temperature.Round.Enable"` option restores the upstream behaviour.
+  Note that Home Assistant's `climate` entity rounds `current_temperature` to whole °F itself when HA uses imperial
+  units; the separate temperature `sensor` entities carry the full value.
+* **Changes are pushed, not just polled.** Upstream's update path had become a no-op, so controllers only saw new
+  values when they polled (every 60 s for Home Assistant). Values from the Nest observe stream now reach HomeKit
+  within a second, including the current heating/cooling state.
+* **Stale data is reported as a fault.** If nothing has been heard from Nest (observe stream messages, REST
+  responses, or HTTP/2 pings on the observe stream) for `staleDataTimeoutMinutes` (default 10), every characteristic
+  read fails with *Service communication failure*, which Home Assistant shows as `unavailable`, and changes are refused.
+  Upstream keeps serving the last values forever.
+* **It does not give up reconnecting.** Upstream stops for good after some failed reauthentications (for example a
+  504 followed by a rejected token); this fork keeps retrying with backoff (30 s up to 15 min) and logs each attempt.
+* **Changes that do not reach Nest are not silently lost.** HomeKit writes are refused while stale or disconnected;
+  protobuf changes are retried after a 401/403 or network error (upstream dropped them); changes that are given up on
+  are logged as errors and HomeKit is re-synced to the real state at once.
+* Errors are logged without the request headers (upstream could print Google cookies into the log).
+
 [![verified-by-homebridge](https://badgen.net/badge/homebridge/verified/purple)](https://github.com/homebridge/homebridge/wiki/Verified-Plugins)
 [![Discord](https://img.shields.io/discord/432663330281226270?color=728ED5&logo=discord&label=discord)](https://discord.gg/j5WwJTB)
 
@@ -59,6 +90,7 @@ Optional fields:
 * `"options"`: `[ "feature1", "feature2", ... ]` // optional list of features to enable/disable (see 'Feature Options' below)
 * `"fanDurationMinutes"`: number of minutes to run the fan when manually turned on (optional, default is `15`)
 * `"hotWaterDurationMinutes"`: number of minutes to run the hot water when manually turned on (optional, default is `30`, only for systems with hot water control)
+* `"staleDataTimeoutMinutes"`: after this many minutes without contact with Nest, report every HomeKit value as faulted and refuse changes, instead of serving the last values (optional, default is `10`, `0` disables)
 
 # Using a Nest Account
 
@@ -167,6 +199,7 @@ Set `"options"` in `config.json` to an array of strings chosen from the followin
 * `"Protect.MotionSensor.Disable"` - disable *MotionDetector* accessory for Nest Protects
 * `"Lock.Disable"` - exclude Nest x Yale Locks from HomeKit
 * `"Nest.FieldTest.Enable"` - set this option if you're using a Nest Field Test account (experimental)
+* `"Temperature.Round.Enable"` - round measured temperatures to the Nest display unit (whole °F, or 0.5 °C) and humidity to whole %, as upstream homebridge-nest does; by default this fork reports them unrounded
 
 By default, options set apply to all devices. To set an option for a specific device only, add `.device_id` to the corresponding `option`, where `device_id` is shown in the Homebridge logs, or in HomeKit itself as *Serial Number* in the Settings page for your device. For example, to disable one specific thermostat with serial number 09AC01AC31180349, add `"Thermostat.Disable.09AC01AC31180349"` to the `"options"` array.
 

@@ -55,6 +55,13 @@
         "placeholder": "Optional, Default is 15",
         "description": "Number of minutes to run the fan when manually turned on"
       },
+      "staleDataTimeoutMinutes": {
+        "title": "Stale Data Timeout",
+        "type": "integer",
+        "minimum": 0,
+        "placeholder": "Optional, Default is 10",
+        "description": "Minutes without contact with Nest after which every HomeKit value is reported as faulted (unavailable in Home Assistant) and changes are refused. 0 disables."
+      },
       "options": {
         "title": "Feature Options",
         "type": "array",
@@ -149,6 +156,7 @@
       "items": [
         "structureId",
         "fanDurationMinutes",
+        "staleDataTimeoutMinutes",
 {
           "key": "options",
           "add": "Add Another Option",
@@ -157,7 +165,7 @@
           "items": [
             {
               "type": "string",
-              "description": "Feature Options to Enable/Disable.",
+              "description": "Feature Options to Enable/Disable (e.g. Temperature.Round.Enable to round temperatures like the Nest display).",
               "displayFlex": true,
               "flex-direction": "row",
               "items": [
