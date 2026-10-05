@@ -19,7 +19,8 @@
   "scripts": {
     "lint": "eslint .",
     "prepublishOnly": "npm run lint",
-    "preversion": "npm run lint"
+    "preversion": "npm run lint",
+    "test": "node test/run.js"
   },
   "dependencies": {
     "axios": "^1.8.4",
@@ -33,6 +34,7 @@
     "@eslint/eslintrc": "^3.3.1",
     "@eslint/js": "^9.23.0",
     "eslint": "^9.23.0",
-    "globals": "^16.0.0"
+    "globals": "^16.0.0",
+    "hap-nodejs": "^0.13.1"
   }
 }
