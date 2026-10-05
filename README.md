@@ -31,6 +31,13 @@ Differences from upstream:
   are logged as errors and HomeKit is re-synced to the real state at once.
 * Errors are logged without the request headers (upstream could print Google cookies into the log).
 
+**Upgrading from upstream (or between fork versions that change characteristic properties):** Home Assistant's
+HomeKit Controller re-reads the accessory when its configuration changes, but its thermostat `sensor` entities
+for current temperature and current humidity (`sensor.<name>_current_temperature` / `_current_humidity`) keep reading
+the old characteristic and **freeze silently** (seen with HA 2026.9). The `climate` entities and the Temperature
+Sensor entities are not affected. After installing, reload the bridge's integration entry (Settings → Devices &
+services → HomeKit Device → ⋮ → Reload; no HA restart needed) and check that those sensors update.
+
 [![verified-by-homebridge](https://badgen.net/badge/homebridge/verified/purple)](https://github.com/homebridge/homebridge/wiki/Verified-Plugins)
 [![Discord](https://img.shields.io/discord/432663330281226270?color=728ED5&logo=discord&label=discord)](https://discord.gg/j5WwJTB)
 
