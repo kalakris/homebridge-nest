@@ -208,7 +208,10 @@ function summarize(records, root) {
             console.log('  ' + key + ': ' + group.n + ' msgs (' + group.snapshots + ' first-in-stream), ' + group.resends + ' re-sends of unchanged bytes, ' + group.values.size + ' distinct value(s)');
             console.log('    gap within a stream: ' + stats(group.gaps));
             const values = Array.from(group.values.entries()).sort((a, b) => b[1] - a[1]);
-            values.slice(0, 8).forEach(([value, n]) => console.log('    x' + n + ' ' + (value.length > 160 ? value.substr(0, 160) + '...' : value)));
+            values.slice(0, 8).forEach(([value, n]) => {
+                const text = value === undefined ? '(no decoded value)' : String(value);
+                console.log('    x' + n + ' ' + (text.length > 160 ? text.substr(0, 160) + '...' : text));
+            });
             if (values.length > 8) {
                 console.log('    ... ' + (values.length - 8) + ' more');
             }
