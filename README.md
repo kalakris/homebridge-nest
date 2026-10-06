@@ -29,6 +29,11 @@ Differences from upstream:
 * **Changes that do not reach Nest are not silently lost.** HomeKit writes are refused while stale or disconnected;
   protobuf changes are retried after a 401/403 or network error (upstream dropped them); changes that are given up on
   are logged as errors and HomeKit is re-synced to the real state at once.
+* **A written setpoint holds until Nest echoes it.** Upstream keeps showing a written value for only 8 s after the
+  push, then shows its cached Nest state again. Nest's observe stream can take ~2 min to echo a write, so (now that
+  values are pushed) controllers saw the pre-write setpoint ~11 s after every write, which looks exactly like a
+  reverted write. The written value now holds until Nest reports it, or reports a different change to that setting,
+  at most 5 min.
 * Errors are logged without the request headers (upstream could print Google cookies into the log).
 * **Raw observe-stream debug log (read-only).** While a file `nest-raw-debug.on` exists in the Homebridge storage
   directory (checked every 30 s, no restart needed), every observe stream frame and every trait of each Nest

@@ -52,19 +52,76 @@ module.exports = async function() {
         assert.ok(Math.abs(s.getService(Service.TemperatureSensor).getCharacteristic(Characteristic.CurrentTemperature).value - 21.04) < 1e-9);
     }
 
-    // A written value keeps forcing until shortly after its push completes, however long the push is delayed
+    // A written value keeps forcing until Nest echoes it, however long the push or the echo takes
     withClock(clock => {
         const conn = makeConnection();
         const t0 = clock.now;
         conn.commitUpdate('shared.T1', { target_temperature_low: 21 }, 'range', true);
-        clock.advance(30000); // debounce + mode-change delay + slow API call; upstream expired after 8 s
+        clock.advance(30000); // debounce + mode-change delay + slow API call
         assert.strictEqual(forcedLow(conn), 21, 'still forced before the push completed');
         conn.settleMergeUpdates(t0 + 29000, true);
-        clock.advance(7000);
-        assert.strictEqual(forcedLow(conn), 21, 'forced shortly after the push');
+        clock.advance(120000); // 2026-10-06: Nest echoed a write ~2 min later; upstream re-synced the old value after 8 s
+        conn.releaseEchoedMergeUpdates(conn.currentState); // unrelated data: the setting still reads the old value
+        assert.strictEqual(forcedLow(conn), 21, 'still forced while Nest has not echoed');
+        assert.deepStrictEqual(conn.resyncs, [], 'no re-sync to the pre-write value');
+        conn.currentState.shared.T1.target_temperature_low = Math.fround(21.0004); // the echo, float32-rounded
+        conn.releaseEchoedMergeUpdates(conn.currentState);
+        assert.strictEqual(conn.mergeUpdates.length, 0, 'released by the echo');
+        assert.ok(Math.abs(forcedLow(conn) - 21) < 0.01);
+        assert.strictEqual(conn.mergeEndTimer, null);
+    });
+
+    // Another change to the same setting after ours (app, schedule) releases ours: Nest's value wins
+    withClock(clock => {
+        const conn = makeConnection();
+        conn.commitUpdate('shared.T1', { target_temperature_low: 21 }, 'range', true);
+        conn.settleMergeUpdates(clock.now, true);
+        conn.currentState.shared.T1.target_temperature_low = 19.5;
+        conn.releaseEchoedMergeUpdates(conn.currentState);
+        assert.strictEqual(forcedLow(conn), 19.5);
+    });
+
+    // Two writes within the echo delay (re-send, hand-back): the echo of the first must not release the second
+    withClock(clock => {
+        const conn = makeConnection();
+        conn.commitUpdate('shared.T1', { target_temperature_low: 21 }, 'range', true);
+        conn.settleMergeUpdates(clock.now, true);
+        clock.advance(60000);
+        conn.commitUpdate('shared.T1', { target_temperature_low: 20.5 }, 'range', true);
+        conn.settleMergeUpdates(clock.now, true);
+        assert.strictEqual(forcedLow(conn), 20.5);
+        conn.currentState.shared.T1.target_temperature_low = 21; // echo of the FIRST write
+        conn.releaseEchoedMergeUpdates(conn.currentState);
+        assert.strictEqual(forcedLow(conn), 20.5, 'the second write still holds');
+        conn.currentState.shared.T1.target_temperature_low = 20.5; // echo of the second
+        conn.releaseEchoedMergeUpdates(conn.currentState);
+        assert.strictEqual(conn.mergeUpdates.length, 0);
+        assert.strictEqual(forcedLow(conn), 20.5);
+    });
+
+    // Nest coalesces: only the second write is echoed -> both released, the echoed value shows
+    withClock(clock => {
+        const conn = makeConnection();
+        conn.commitUpdate('shared.T1', { target_temperature_low: 21 }, 'range', true);
+        conn.settleMergeUpdates(clock.now, true);
+        conn.commitUpdate('shared.T1', { target_temperature_low: 20.5 }, 'range', true);
+        conn.settleMergeUpdates(clock.now, true);
+        conn.currentState.shared.T1.target_temperature_low = 20.5;
+        conn.releaseEchoedMergeUpdates(conn.currentState);
+        assert.strictEqual(conn.mergeUpdates.length, 0);
+        assert.strictEqual(forcedLow(conn), 20.5);
+    });
+
+    // A pushed change that is never echoed is dropped after API_MERGE_ECHO_MAX_SECONDS, and HomeKit re-synced
+    withClock(clock => {
+        const conn = makeConnection();
+        conn.commitUpdate('shared.T1', { target_temperature_low: 21 }, 'range', true);
+        conn.settleMergeUpdates(clock.now, true);
+        clock.advance(299000);
+        assert.strictEqual(forcedLow(conn), 21);
         clock.advance(2000);
-        assert.strictEqual(forcedLow(conn), 20, 'expired 8 s after the push');
         conn.scheduleMergeEnd();
+        assert.strictEqual(forcedLow(conn), 20);
         assert.deepStrictEqual(conn.resyncs, [20], 're-synced once on expiry');
         assert.strictEqual(conn.mergeEndTimer, null);
     });
