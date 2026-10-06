@@ -3,6 +3,8 @@
 const axios = require('axios');
 
 const NestConnection = require('./lib/nest-connection');
+const os = require('os');
+const path = require('path');
 
 let ThermostatAccessory, HomeAwayAccessory, TempSensorAccessory, ProtectAccessory, LockAccessory;
 
@@ -150,7 +152,13 @@ class NestPlatform {
             throw('When using googleAuth, you must provide issueToken and cookies in config.json. Please see README.md for instructions');
         }
 
-        const conn = new NestConnection(this.config, this.log, verbose, fieldTestMode);
+        let storagePath;
+        try {
+            storagePath = this.api.user.storagePath();
+        } catch(error) {
+            storagePath = path.join(os.homedir(), '.homebridge');
+        }
+        const conn = new NestConnection(this.config, this.log, verbose, fieldTestMode, storagePath);
 
         if (await conn.auth()) {
             return conn;

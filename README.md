@@ -30,6 +30,12 @@ Differences from upstream:
   protobuf changes are retried after a 401/403 or network error (upstream dropped them); changes that are given up on
   are logged as errors and HomeKit is re-synced to the real state at once.
 * Errors are logged without the request headers (upstream could print Google cookies into the log).
+* **Raw observe-stream debug log (read-only).** While a file `nest-raw-debug.on` exists in the Homebridge storage
+  directory (checked every 30 s, no restart needed), every observe stream frame and every trait of each Nest
+  Temperature Sensor (plus thermostat temperature/humidity/HVAC traits) is appended, with its raw protobuf bytes and
+  any envelope fields the plugin's schema ignores, to `nest-raw-debug.jsonl` there (mode 0600, stops at 50 MB).
+  `node scripts/decode-raw-debug.js [--summary] nest-raw-debug.jsonl` decodes the raw bytes generically (unknown
+  fields included) and summarises message cadence, unchanged re-sends and undeclared fields per sensor.
 
 **Upgrading from upstream (or between fork versions that change characteristic properties):** Home Assistant's
 HomeKit Controller re-reads the accessory when its configuration changes, but its thermostat `sensor` entities
