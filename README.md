@@ -32,7 +32,8 @@ Differences from upstream:
 * **A written setpoint holds until Nest echoes it.** Upstream keeps showing a written value for only 8 s after the
   push, then shows its cached Nest state again. Nest's observe stream can take ~2 min to echo a write, so (now that
   values are pushed) controllers saw the pre-write setpoint ~11 s after every write, which looks exactly like a
-  reverted write. The written value now holds until Nest reports it, or reports a different change to that setting.
+  reverted write. The written value now holds until Nest reports it, or reports a different change to that setting
+  (Nest still showing the value before it, or the echo of our own earlier write, is not one).
   If neither has happened after 5 min, the plugin does not fall back to its cached (pre-write) state: the stream
   can simply miss the echo (once it came only with a new stream ~10 min later). It restarts the observe stream,
   whose first message is Nest's full current state, and shows that: the written value if Nest has it, otherwise

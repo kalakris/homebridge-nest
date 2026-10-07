@@ -115,17 +115,30 @@ module.exports = async function() {
         assert.strictEqual(forced(conn), 19.5);
     });
 
-    // Only a message on a NEW stream counts, and only one that carried the setpoint trait: anything else is the
-    // previous stream's cached value, so the write keeps holding
+    // Only a message on a NEW stream counts, and only for a setting whose trait it carried: anything else is the
+    // previous stream's cached value. The refresh stays open until each of its changes is decided, so a snapshot split
+    // over several messages still decides them all.
     await withClock(async clock => {
         const conn = makeConnection();
-        await unechoedWrite(clock, conn);
+        conn.commitUpdate('shared.T1', { target_temperature_low: 21 }, 'range', true);
+        conn.commitUpdate('shared.T2', { target_temperature_low: 19 }, 'range', true);
+        conn.settleMergeUpdates(clock.now, true);
+        clock.advance(301000);
+        conn.scheduleMergeEnd();
+        await tick();
+        assert.strictEqual(conn.restarts, 1);
         conn.releaseEchoedMergeUpdates(conn.currentState, conn.refreshSnapshotTraits({ hasDeviceInfo: true, traits: SNAPSHOT_T1 }));
         assert.strictEqual(forced(conn), 21, 'message on the old stream');
+        conn.currentState.shared.T2.target_temperature_low = 19;
         snapshot(conn, [['target_temperature_settings', 'DEVICE_T2', SETPOINTS], ['hvac_control', 'DEVICE_T1', 'x']]);
-        assert.strictEqual(forced(conn), 21, 'snapshot without T1 setpoints');
-        assert.strictEqual(conn.echoRefresh, null, 'the refresh has had its snapshot');
-        done(conn);
+        assert.strictEqual(forced(conn), 21, 'T1 not decided by a message without its setpoints');
+        assert.strictEqual(forced(conn, 'T2'), 19);
+        assert.deepStrictEqual(conn.mergeUpdates.map(u => u.object.object_key), ['shared.T1'], 'T2 decided');
+        assert.notStrictEqual(conn.echoRefresh, null, 'the refresh is still open for T1');
+        conn.releaseEchoedMergeUpdates(conn.currentState, conn.refreshSnapshotTraits({ hasDeviceInfo: false, traits: SNAPSHOT_T1 }));
+        assert.strictEqual(conn.mergeUpdates.length, 0, 'T1 decided by a later message on the new stream');
+        assert.strictEqual(forced(conn), 20);
+        assert.strictEqual(conn.echoRefresh, null, 'refresh closed once all its changes are decided');
     });
 
     // What counts as a snapshot carrying a change's setting (ids as translateProperty maps them)
@@ -154,6 +167,7 @@ module.exports = async function() {
         assert.strictEqual(forced(conn), 20);
         assert.strictEqual(conn.restarts, 1, 'no second restart');
         assert.strictEqual(conn.mergeEndTimer, null);
+        assert.strictEqual(conn.echoRefresh, null, 'refresh closed on timeout');
     });
 
     // Disconnected at the echo limit: no stream to restart, today's behaviour at once
@@ -220,29 +234,55 @@ module.exports = async function() {
         assert.strictEqual(conn.mergeUpdates.length, 0);
     });
 
-    // A mode change: target_change_pending is never in Nest's state, so the mode alone is the echo
+    // A HomeKit mode change through update(): it writes device.eco = { mode: 'schedule' } (an object, compared by
+    // content) and shared { target_change_pending, target_temperature_type } (target_change_pending is never in
+    // Nest's state, so the mode alone is the echo). Both hold until echoed, and need no refresh.
     await withClock(async clock => {
         const conn = makeConnection();
-        conn.commitUpdate('shared.T1', { target_change_pending: true, target_temperature_type: 'heat' }, null, true);
+        conn.currentState.device.T1.eco = { mode: 'manual-eco' };
+        conn.update('shared.T1', 'hvac_mode', 'heat', 'range', true);
         conn.settleMergeUpdates(clock.now, true);
-        assert.strictEqual(conn.mergeUpdates.length, 1);
+        assert.strictEqual(conn.mergeUpdates.length, 2);
+        const forcedEco = () => conn.mergePendingUpdates(conn.currentState).device.T1.eco.mode;
+        conn.currentState.device.T1.eco = { mode: 'manual-eco' }; // a frame: Nest has not applied it yet
+        conn.releaseEchoedMergeUpdates(conn.currentState);
+        assert.strictEqual(conn.mergeUpdates.length, 2, 'not taken for another change');
+        assert.strictEqual(forcedEco(), 'schedule');
+        conn.currentState.device.T1.eco = { mode: 'schedule' };
         conn.currentState.shared.T1.target_temperature_type = 'heat';
         conn.releaseEchoedMergeUpdates(conn.currentState);
-        assert.strictEqual(conn.mergeUpdates.length, 0, 'released by the mode echo');
+        assert.strictEqual(conn.mergeUpdates.length, 0, 'released by the echo');
         clock.advance(301000);
         conn.scheduleMergeEnd();
         await tick();
         assert.strictEqual(conn.restarts, 0, 'no refresh');
+        assert.deepStrictEqual(conn.resyncs, []);
     });
 
-    // A later push re-settling a change that waits for a refresh gives it a full echo wait again
+    // A later push does not touch an earlier pushed change: a success does not pull it out of its refresh (or
+    // restart its echo wait), a failure does not drop it
     await withClock(async clock => {
         const conn = makeConnection();
         await unechoedWrite(clock, conn);
+        const expiry = conn.mergeUpdates[0].expiry_time;
+        conn.commitUpdate('shared.T2', { target_temperature_low: 19 }, 'range', true);
         conn.settleMergeUpdates(clock.now, true);
-        assert.strictEqual(conn.mergeUpdates[0].refreshing, false);
+        assert.strictEqual(conn.mergeUpdates[0].refreshing, true);
+        assert.strictEqual(conn.mergeUpdates[0].expiry_time, expiry);
         snapshot(conn, SNAPSHOT_T1);
-        assert.strictEqual(forced(conn), 21, 'not decided by a refresh it is no longer part of');
+        assert.strictEqual(forced(conn), 20, 'decided by its refresh');
+        done(conn);
+    });
+    await withClock(async clock => {
+        const conn = makeConnection();
+        conn.commitUpdate('shared.T1', { target_temperature_low: 21 }, 'range', true);
+        conn.settleMergeUpdates(clock.now, true);
+        clock.advance(60000);
+        conn.commitUpdate('shared.T2', { target_temperature_low: 19 }, 'range', true);
+        conn.settleMergeUpdates(clock.now, false);
+        assert.strictEqual(forced(conn), 21, 'the pushed write still holds');
+        assert.strictEqual(forced(conn, 'T2'), 18, 'the failed one is dropped');
+        assert.deepStrictEqual(conn.resyncs, [21], 'HomeKit re-synced with T1 still forced');
         done(conn);
     });
 

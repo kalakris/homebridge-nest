@@ -99,6 +99,26 @@ module.exports = async function() {
         assert.strictEqual(forcedLow(conn), 20.5);
     });
 
+    // A second write while Nest still reports the value before the first (re-send, block edge): a frame for the
+    // device that echoes neither must not release the second write as "someone else's change"
+    withClock(clock => {
+        const conn = makeConnection();
+        conn.commitUpdate('shared.T1', { target_temperature_low: 21 }, 'range', true);
+        conn.settleMergeUpdates(clock.now, true);
+        clock.advance(10000);
+        conn.commitUpdate('shared.T1', { target_temperature_low: 21.5 }, 'range', true);
+        conn.settleMergeUpdates(clock.now, true);
+        conn.releaseEchoedMergeUpdates(conn.currentState); // Nest still reports 20
+        assert.strictEqual(forcedLow(conn), 21.5, 'the second write still holds');
+        conn.currentState.shared.T1.target_temperature_low = 21; // echo of the first
+        conn.releaseEchoedMergeUpdates(conn.currentState);
+        assert.strictEqual(forcedLow(conn), 21.5);
+        conn.currentState.shared.T1.target_temperature_low = 21.5;
+        conn.releaseEchoedMergeUpdates(conn.currentState);
+        assert.strictEqual(conn.mergeUpdates.length, 0);
+        clearTimeout(conn.mergeEndTimer);
+    });
+
     // Nest coalesces: only the second write is echoed -> both released, the echoed value shows
     withClock(clock => {
         const conn = makeConnection();
