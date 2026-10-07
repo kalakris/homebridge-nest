@@ -112,7 +112,8 @@ module.exports = async function() {
         assert.strictEqual(forcedLow(conn), 20.5);
     });
 
-    // A pushed change that is never echoed is dropped after API_MERGE_ECHO_MAX_SECONDS, and HomeKit re-synced
+    // A pushed change that is never echoed is dropped after API_MERGE_ECHO_MAX_SECONDS, and HomeKit re-synced, when no
+    // fresh read is possible (not connected; see echo-refresh.test.js for the refresh)
     withClock(clock => {
         const conn = makeConnection();
         conn.commitUpdate('shared.T1', { target_temperature_low: 21 }, 'range', true);
