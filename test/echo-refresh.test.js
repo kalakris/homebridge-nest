@@ -29,6 +29,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 function makeConnection() {
     const conn = new Connection({}, silent, false, false);
     conn.pushUpdatesDebounced = () => {};
+    conn.pushUpdates = () => {}; // mode changes push at once
     conn.connected = true;
     conn.token = 'token';
     conn.currentState = {
@@ -217,6 +218,21 @@ module.exports = async function() {
         assert.strictEqual(conn.restarts, 0);
         conn.releaseEchoedMergeUpdates(conn.currentState, conn.refreshSnapshotTraits({ hasDeviceInfo: true, traits: SNAPSHOT_T1 }));
         assert.strictEqual(conn.mergeUpdates.length, 0);
+    });
+
+    // A mode change: target_change_pending is never in Nest's state, so the mode alone is the echo
+    await withClock(async clock => {
+        const conn = makeConnection();
+        conn.commitUpdate('shared.T1', { target_change_pending: true, target_temperature_type: 'heat' }, null, true);
+        conn.settleMergeUpdates(clock.now, true);
+        assert.strictEqual(conn.mergeUpdates.length, 1);
+        conn.currentState.shared.T1.target_temperature_type = 'heat';
+        conn.releaseEchoedMergeUpdates(conn.currentState);
+        assert.strictEqual(conn.mergeUpdates.length, 0, 'released by the mode echo');
+        clock.advance(301000);
+        conn.scheduleMergeEnd();
+        await tick();
+        assert.strictEqual(conn.restarts, 0, 'no refresh');
     });
 
     // A later push re-settling a change that waits for a refresh gives it a full echo wait again
