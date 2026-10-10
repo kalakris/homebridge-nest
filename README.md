@@ -40,6 +40,13 @@ Differences from upstream:
   Nest's value (a write that did not land, or someone else's change). One restart covers every change due within a
   minute, and restarts are at least a minute apart. If no fresh state arrives within 30 s, or the plugin is not
   connected, it re-syncs from cached state as before. Each restart and its outcome are logged at info level.
+  A newer write to the same setting supersedes an earlier one that is still waiting, once the newer push has
+  succeeded: the earlier one stops holding its value and gets no restart of its own, and the newer one holds from
+  its own push as above. (Before 4.6.10-ha.6 each write kept its own wait. A setpoint written and written back
+  within the echo delay, 72 -> 73 -> 72 °F a minute apart, then showed 73 for five minutes: Nest reported only 72,
+  the second write's echo, but for the first write just the value before it.) This is per setting: an earlier write
+  of several settings keeps waiting for those the newer one did not write. If the newer push fails it is dropped as
+  before, and the earlier write still holds.
   (The full state a new observe stream opens with now reaches HomeKit; upstream applied it only internally, so
   HomeKit saw it with the device's next change.)
 * Errors are logged without the request headers (upstream could print Google cookies into the log).
