@@ -6,7 +6,11 @@ const NestConnection = require('./lib/nest-connection');
 const os = require('os');
 const path = require('path');
 
-let ThermostatAccessory, HomeAwayAccessory, TempSensorAccessory, ProtectAccessory, LockAccessory;
+let ThermostatAccessory, HomeAwayAccessory, TempSensorAccessory, ProtectAccessory, LockAccessory, hap;
+
+// While the start-up is waiting for Nest's device list: how often to say so in the log. From the first notice on, the
+// accessories restored from Homebridge's cache report a fault (see waitForDeviceList).
+const DEVICE_LIST_WAIT_NOTICE_SECONDS = 60;
 
 require('promise.prototype.finally').shim(Promise);
 
@@ -32,6 +36,7 @@ class NestPlatform {
         this.api = api;
         this.accessoryLookup = {};
         this.cachedAccessories = [];
+        this.deviceListWaitNoticeSeconds = DEVICE_LIST_WAIT_NOTICE_SECONDS;
 
         api.on('didFinishLaunching', async () => {
             this.log('Fetching Nest devices.');
@@ -96,8 +101,11 @@ class NestPlatform {
             try {
                 this.conn = await this.setupConnection(this.optionSet('Debug.Verbose'), this.optionSet('Nest.FieldTest.Enable'));
                 await this.conn.subscribe(handleUpdates);
-                await this.conn.observe(handleUpdates);
+                await this.waitForDeviceList(this.conn.observe(handleUpdates));
 
+                // The accessories are built once, here, from Nest's device list, and every cached accessory is replaced
+                // by what was built: a cached device is removed only if that list does not have it. (handleUpdates
+                // updates accessories, it never adds one.)
                 let initialState = this.conn.apiResponseToObjectTree(this.conn.currentState);
                 this.accessoryLookup = generateAccessories(initialState);
 
@@ -133,6 +141,56 @@ class NestPlatform {
 
     configureAccessory(accessory) {
         this.cachedAccessories.push(accessory);
+    }
+
+    // Waits for the device list (listed: the promise of conn.observe()), however long Nest takes: the accessories
+    // restored from Homebridge's cache stay registered meanwhile. Normally the list arrives within seconds and nothing
+    // is logged here. While it does not, this says so every deviceListWaitNoticeSeconds, and from the first notice
+    // on the cached accessories answer reads and writes with a fault: nothing handles them before the accessories are
+    // built, so HomeKit would serve the values stored at the last shutdown as current and accept a setpoint that is
+    // never sent to Nest.
+    async waitForDeviceList(listed) {
+        const start = Date.now();
+        let notices = 0;
+        const timer = setInterval(() => {
+            try {
+                if (!notices++) {
+                    this.faultCachedAccessories();
+                }
+                this.log.warn('Still waiting for the device list from Nest after ' + Math.round((Date.now() - start) / 1000) + ' seconds. The ' + this.cachedAccessories.length + ' cached accessories are kept and report a fault until it arrives.');
+            } catch(error) {
+                // Only a notice
+            }
+        }, this.deviceListWaitNoticeSeconds * 1000);
+        if (timer.unref) {
+            timer.unref();
+        }
+        try {
+            await listed;
+        } finally {
+            clearInterval(timer);
+        }
+        if (notices) {
+            this.log('Device list received from Nest after ' + Math.round((Date.now() - start) / 1000) + ' seconds.');
+        }
+    }
+
+    // Reads and writes of the cached accessories fail (Home Assistant: unavailable) from now on. They are replaced by
+    // the accessories built from the device list when it arrives.
+    faultCachedAccessories() {
+        const failure = () => (hap && hap.HapStatusError && hap.HAPStatus) ? new hap.HapStatusError(hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE) : new Error('No device list from Nest yet');
+        this.cachedAccessories.forEach(accessory => {
+            try {
+                accessory.services.forEach(service => {
+                    service.characteristics.forEach(characteristic => {
+                        characteristic.on('get', callback => callback(failure()));
+                        characteristic.on('set', (value, callback) => callback(failure()));
+                    });
+                });
+            } catch(error) {
+                this.log.error('Could not mark the cached accessory ' + accessory.displayName + ' as faulted: ' + error);
+            }
+        });
     }
 
     optionSet(key, serialNumber, deviceId) {
@@ -177,6 +235,7 @@ module.exports = function(homebridge) {
         uuid: homebridge.hap.uuid
     };
 
+    hap = homebridge.hap;
     require('./lib/nest-device-accessory')(exportedTypes);
     ThermostatAccessory = require('./lib/nest-thermostat-accessory')();
     HomeAwayAccessory = require('./lib/nest-homeaway-accessory')();

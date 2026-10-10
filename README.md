@@ -55,6 +55,17 @@ Differences from upstream:
   67/74.)
   (The full state a new observe stream opens with now reaches HomeKit; upstream applied it only internally, so
   HomeKit saw it with the device's next change.)
+* **A start waits for Nest's device list.** The plugin builds its accessories once, when the observe stream has
+  delivered the device list, and removes every accessory Homebridge had cached that it did not build. Upstream (and
+  this fork before 4.6.10-ha.7) also went ahead when the first stream ended without the list, with whatever the REST
+  API alone had delivered: on 2026-10-10 a restart whose first stream ended after ~17 s without data removed both
+  thermostats and all temperature sensors from HomeKit until the next restart, with nothing in the log. Now the start
+  waits, however long it takes; a stream that ends without the list is logged, and so is the wait, once a minute.
+  The cached accessories stay registered meanwhile; from the first of those notices (60 s) they answer reads and
+  writes with *Service communication failure* instead of serving the values stored at the last shutdown and taking
+  writes that go nowhere. A cached device is removed only when the list has arrived and does not have it. (If the
+  observe stream never delivers a list, the plugin never finishes starting; upstream would have started with the
+  REST API's devices alone.)
 * Errors are logged without the request headers (upstream could print Google cookies into the log).
 * **Raw observe-stream debug log (read-only).** While a file `nest-raw-debug.on` exists in the Homebridge storage
   directory (checked every 30 s, no restart needed), every observe stream frame and every trait of each Nest
