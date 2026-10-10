@@ -66,6 +66,13 @@ Differences from upstream:
   writes that go nowhere. A cached device is removed only when the list has arrived and does not have it. (If the
   observe stream never delivers a list, the plugin never finishes starting; upstream would have started with the
   REST API's devices alone.)
+* **Nest's answer to each change is logged.** Nest answers 2xx to changes it then does not apply (six of ~300
+  setpoint writes in four days, each apparently answered only after 15-33 s), and the plugin did not look at the
+  answer. It still decides nothing from it (no real answer had been examined when this was written), but logs how
+  long the answer took, the HTTP status, the size of the body, the status codes and progress values found in it, and
+  its first 32 bytes in hex: at info level when it took 10 s or more, carried a status other than 0, could not be
+  read, or is of a kind not seen since the plugin started; otherwise only with `"Debug.Verbose"`. Look for
+  `Nest answered the change`.
 * Errors are logged without the request headers (upstream could print Google cookies into the log).
 * **Raw observe-stream debug log (read-only).** While a file `nest-raw-debug.on` exists in the Homebridge storage
   directory (checked every 30 s, no restart needed), every observe stream frame and every trait of each Nest
