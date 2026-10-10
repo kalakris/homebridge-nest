@@ -82,6 +82,8 @@ module.exports = async function() {
     });
 
     // Two writes within the echo delay (re-send, hand-back): the echo of the first must not release the second
+    // (The first is superseded when the second is pushed, see supersede.test.js; what this still checks is that its
+    // late echo is not taken for someone else's change.)
     withClock(clock => {
         const conn = makeConnection();
         conn.commitUpdate('shared.T1', { target_temperature_low: 21 }, 'range', true);
@@ -120,6 +122,8 @@ module.exports = async function() {
     });
 
     // Nest coalesces: only the second write is echoed -> both released, the echoed value shows
+    // (Since the second write's push supersedes the first, this only checks that the second's echo leaves nothing
+    // held; the live case of it, written back to the value before the first, is in supersede.test.js.)
     withClock(clock => {
         const conn = makeConnection();
         conn.commitUpdate('shared.T1', { target_temperature_low: 21 }, 'range', true);

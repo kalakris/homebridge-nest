@@ -46,7 +46,13 @@ Differences from upstream:
   within the echo delay, 72 -> 73 -> 72 °F a minute apart, then showed 73 for five minutes: Nest reported only 72,
   the second write's echo, but for the first write just the value before it.) This is per setting: an earlier write
   of several settings keeps waiting for those the newer one did not write. If the newer push fails it is dropped as
-  before, and the earlier write still holds.
+  before, and the earlier write still holds. The same goes for a setting written twice before one push (within the
+  2 s the plugin collects changes, or when a failed push is retried together with a newer write): only the last
+  value is sent, and only it is held.
+  Each setpoint of a two-setpoint write is held on its own. (Before 4.6.10-ha.6, when one write changed both the
+  heating and the cooling setpoint, the one written first was released by the first message from Nest that did not
+  yet carry the new values, and HomeKit showed its old value again until the echo: 67/70 -> 69/74 °F read back as
+  67/74.)
   (The full state a new observe stream opens with now reaches HomeKit; upstream applied it only internally, so
   HomeKit saw it with the device's next change.)
 * Errors are logged without the request headers (upstream could print Google cookies into the log).

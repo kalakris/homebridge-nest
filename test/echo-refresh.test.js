@@ -259,8 +259,9 @@ module.exports = async function() {
         assert.deepStrictEqual(conn.resyncs, []);
     });
 
-    // A later push does not touch an earlier pushed change: a success does not pull it out of its refresh (or
-    // restart its echo wait), a failure does not drop it
+    // A later push of another setting (here another thermostat's) does not touch an earlier pushed change: a success
+    // does not pull it out of its refresh (or restart its echo wait), a failure does not drop it. A later push of the
+    // SAME setting supersedes it on success: supersede.test.js.
     await withClock(async clock => {
         const conn = makeConnection();
         await unechoedWrite(clock, conn);
