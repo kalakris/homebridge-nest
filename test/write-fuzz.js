@@ -700,8 +700,8 @@ function create(deps) {
                 if (wire !== undefined && !same(wire, entry.value)) {
                     // (P13: the same where the threshold was written while the accessory held a single mode and the
                     // request is built for range mode: pushUpdates turns it into a target temperature, which a
-                    // range-mode request does not carry. It happens after a mode change was dropped by a failed
-                    // push; the threshold is then not sent at all. So it was before.)
+                    // range-mode request does not carry, and the threshold is not sent at all. A mode change back to
+                    // range within the debounce is enough; no request need have failed. So it was before.)
                     world.violation(entry.mode == 'range' ? 'I13' : 'P13', 'request ' + request.number + ' is taken to carry ' + entry.object + '/' + entry.key + '=' + entry.value + ', and its bytes hold ' + wire);
                 }
             }
