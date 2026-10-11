@@ -552,14 +552,46 @@ const cases = {
         await world.sent(3);
         assert.deepStrictEqual(world.requests[2].carries, ['up RANGE 20/23.3', 'dn RANGE 18.9/22.8']);
         world.answer(3, NOT_APPLIED, 15.6);
+        // The pair has been sent twice: given up. The other thermostat's change once: it is sent again, alone
+        await world.sent(4);
+        assert.deepStrictEqual(world.requests[3].carries, ['up RANGE 20/23.3']);
+        world.answer(4, landed([UP]), 3.3);
         await other;
         reauthenticated(true);
         await push;
         await quiet();
-        assert.strictEqual(world.requests.length, 3, 'not sent a fourth time');
-        assert.deepStrictEqual(held(conn), []);
-        assert.ok(world.said().some(line => /^error .*\(attempt 2 of 2\) - these changes were NOT applied: /.test(line)), world.said().join('\n'));
-        assert.strictEqual(timers(conn), 0);
+        assert.strictEqual(world.requests.length, 4, 'the pair is not sent a third time');
+        assert.deepStrictEqual(held(conn), ['up {"high":23.3} pushed 300']);
+        assert.ok(world.said().some(line => /^error .*\(attempt 2 of 2\) - these changes were NOT applied: shared\.BBBB000000000002 \{"target_temperature_low":18\.9,"target_temperature_high":22\.8\}$/.test(line)), world.said().join('\n'));
+        clearTimeout(conn.mergeEndTimer);
+    },
+
+    // Found in review. A change queued (within the debounce) when another is sent again rides with it in that
+    // request. Answered status 4, it has been sent once: it gets its own second attempt, the other is given up.
+    async 'a change queued when another is sent again rides with it, and gets its own two attempts'() {
+        const world = await makeWorld();
+        const conn = world.conn;
+        writePair(conn, DN, 18.9, 22.8);
+        const push = conn.pushUpdates();
+        await world.sent(1);
+        set(conn, UP, HIGH, 23.3); // (queued; its debounced push has not fired)
+        assert.strictEqual(conn.pendingUpdates.length, 1);
+        world.answer(1, NOT_APPLIED, 15.6);
+        await world.sent(2);
+        assert.deepStrictEqual(world.requests[1].carries, ['up RANGE 20/23.3', 'dn RANGE 18.9/22.8']);
+        world.answer(2, NOT_APPLIED, 15.6);
+        await world.sent(3);
+        assert.deepStrictEqual(world.requests[2].carries, ['up RANGE 20/23.3'], 'the rider is sent again on its own; the pair is given up');
+        world.answer(3, landed([UP]), 3.3);
+        await push;
+        await quiet();
+        assert.deepStrictEqual(held(conn), ['up {"high":23.3} pushed 300']);
+        assert.deepStrictEqual(world.shown[world.shown.length - 1], { up: '20/23.3 range', dn: '18.9/21.1 range' });
+        const errors = world.said().filter(line => /^error /.test(line));
+        assert.strictEqual(errors.length, 1, world.said().join('\n'));
+        assert.ok(/\(attempt 2 of 2\) - these changes were NOT applied: shared\.BBBB000000000002 \{"target_temperature_low":18\.9,"target_temperature_high":22\.8\}$/.test(errors[0]), errors[0]);
+        assert.ok(world.said().some(line => /sending shared\.AAAA000000000001 \{"target_temperature_high":23\.3\} again \(the rest is not: .*\) \(attempt 2 of 2\)\.$/.test(line)), world.said().join('\n'));
+        clearTimeout(conn.mergeEndTimer);
     },
 
     // Found by the randomized test. A setpoint written just after an eco or mode change is marked pushed when that
@@ -657,13 +689,16 @@ const cases = {
         assert.deepStrictEqual(world.requests[1].carries, ['up RANGE 19.4/22.8', 'dn RANGE 18.9/21.7']);
         assert.deepStrictEqual(held(conn), ['dn {"low":18.9} waiting 120', 'dn {"high":21.7} waiting 120', 'up {"low":19.4} waiting 118.4', 'up {"high":22.8} waiting 118.4']);
         world.answer(2, NOT_APPLIED, 15.6);
+        // Not applied again: the pair sent twice is dropped; the newer pair, sent once, is sent again on its own
+        await world.sent(3);
+        assert.deepStrictEqual(world.requests[2].carries, ['up RANGE 19.4/22.8']);
+        assert.deepStrictEqual(showing(conn), { up: '19.4/22.8 range', dn: '18.9/21.1 range' });
+        world.answer(3, landed([UP]), 3.3);
         await push;
-        // Not applied again: all of that request is dropped, the newer pair with it
-        assert.deepStrictEqual(held(conn), []);
-        assert.deepStrictEqual(showing(conn), { up: '20/22.2 range', dn: '18.9/21.1 range' });
-        assert.strictEqual(world.requests.length, 2);
-        assert.ok(/^error .* - these changes were NOT applied: shared\.BBBB000000000002 \{"target_temperature_low":18\.9,"target_temperature_high":21\.7\}; shared\.AAAA000000000001 \{"target_temperature_low":19\.4,"target_temperature_high":22\.8\}$/.test(world.said()[1]), world.said()[1]);
-        assert.strictEqual(timers(conn), 0);
+        assert.deepStrictEqual(held(conn), ['up {"low":19.4} pushed 300', 'up {"high":22.8} pushed 300']);
+        assert.strictEqual(world.requests.length, 3);
+        assert.ok(/^error .* \(attempt 2 of 2\) - these changes were NOT applied: shared\.BBBB000000000002 \{"target_temperature_low":18\.9,"target_temperature_high":21\.7\}$/.test(world.said()[1]), world.said()[1]);
+        clearTimeout(conn.mergeEndTimer);
     },
 
     // A mode change is pushed at once, in a request of its own, after one that ends eco mode
@@ -1038,7 +1073,7 @@ const cases = {
         await quiet();
         assert.strictEqual(world.requests.length, 1);
         assert.deepStrictEqual(held(conn), ['dn {"low":18.9} pushed 300', 'dn {"high":22.8} pushed 300']);
-        assert.deepStrictEqual(world.said(), []);
+        assert.deepStrictEqual(world.said().map(line => line.replace(/: .*$/, '')), ['error Deciding what to send again after a status 4 failed, so the answer is taken as before (the change is held until Nest echoes it or its state is read)']);
         assert.strictEqual(conn.failedPushAPICalls, 0);
         clearTimeout(conn.mergeEndTimer);
     },
