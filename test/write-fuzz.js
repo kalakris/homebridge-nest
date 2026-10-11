@@ -12,11 +12,12 @@
 // Operations: both setpoints or one, a mode change, eco on or off, the target temperature (single modes), a change
 // made at Nest by someone else, an unrelated message, a new observe stream, nest-no-resend.on created or removed.
 // Gaps from none to minutes, so that writes fall inside the debounce, into an unanswered push and into a resend.
-// Answers: normal (fast, or slow up to the timeout), the bare status 4, other statuses, garbage, HTTP 401 / 403 /
-// 400 / 500, a timeout, connection errors. Messages from Nest: in order, or (profile "lossy") late, never, or out of
+// Answers: normal (fast, or slow up to the timeout), nothing but a status 4 or a status 7 (with or without a text),
+// other statuses, garbage, HTTP 401 / 403 / 400 / 500, a timeout, connection errors. A reauthentication takes a
+// while, and can fail. Messages from Nest: in order, or (profile "lossy") late, never, or out of
 // order; a restarted stream opens with Nest's full state.
 //
-// What is checked is in check() and settle() below, numbered I1 to I9.
+// What is checked is in check() and settle() below, numbered I1 to I15.
 
 const crypto = require('crypto');
 const fs = require('fs');
@@ -32,6 +33,8 @@ const NOT_APPLIED = Buffer.from('12020804', 'hex');
 const FLAG_FILE = 'nest-no-resend.on';
 // The plugin's API_PUSH_RESEND_MAX, API_MERGE_UNPUSHED_MAX_SECONDS and API_MERGE_ECHO_MAX_SECONDS
 const RESEND_MAX = 1, UNPUSHED_MAX_MS = 120000, ECHO_MAX_MS = 300000;
+// The kinds of answer (DRAWS.answer) that are an HTTP 200, and those of them that say Nest did not apply the request
+const ANSWERED = ['ok', 'status4', 'status7', 'status', 'garbage'], LOST = ['status4', 'status7'];
 const RETRYABLE_CODES = ['ECONNREFUSED', 'ESOCKETTIMEDOUT', 'ECONNABORTED', 'ENETUNREACH', 'ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN'];
 
 // ---- Random numbers: every draw is a function of the seed and of what it is for, so that a scenario can be cut
@@ -72,7 +75,7 @@ function weighted(r, table) {
 
 // ---- Scenario
 
-// options: { status4: false } never draws the bare status 4; { flag: 'on' } has nest-no-resend.on there throughout,
+// options: { status4: false } never draws a bare status 4 or 7; { flag: 'on' } has nest-no-resend.on there throughout,
 // 'never' never, otherwise it comes and goes; { errors, lossy, modes } force that part of the profile
 function generate(seed, options) {
     options = options || {};
@@ -124,26 +127,34 @@ function draw(scenario, kind, index) {
 
 const DRAWS = {
     // How a request is answered, after how long, and whether Nest applies it (and when, as a share of that time).
-    // The bare status 4 is never applied; what Nest does with a request it answers oddly, or whose answer is lost,
-    // is not known, so both happen.
+    // One answered with nothing but a status 4 or 7 is never applied; what Nest does with a request it answers
+    // oddly, or whose answer is lost, is not known, so both happen.
     answer(r, profile) {
-        const kind = weighted(r, [['ok', 50], ['status4', profile.status4 ? 22 : 0], ['status', 6], ['garbage', 4]]
+        const kind = weighted(r, [['ok', 50], ['status4', profile.status4 ? 14 : 0], ['status7', profile.status4 ? 9 : 0], ['status', 6], ['garbage', 4]]
             .concat(profile.errors ? [['401', 5], ['403', 1], ['400', 1], ['500', 3], ['timeout', 3], ['ECONNRESET', 3], ['ENETUNREACH', 2]] : []));
         const seconds = {
             ok: () => r() < 0.7 ? between(r, 0.3, 5) : between(r, 5, 39),
             status4: () => r() < 0.8 ? between(r, 15, 33) : between(r, 0.2, 5),
+            status7: () => r() < 0.8 ? between(r, 15, 33) : between(r, 0.2, 5),
             status: () => between(r, 0.3, 30),
             garbage: () => between(r, 0.3, 30),
             timeout: () => 40
         };
-        const applied = { ok: 1, status4: 0, status: 0.5, garbage: 0.5, timeout: 0.3, ECONNRESET: 0.15 };
-        const body = { status: () => pick(r, ['12020805', '1202080d', '1213080412' + '0f' + Buffer.from('deadline exceeded').toString('hex').slice(0, 30), '1200']), garbage: () => pick(r, ['ffffffff', '3c68746d6c3e', '0a7f01', '120208']) };
+        const applied = { ok: 1, status4: 0, status7: 0, status: 0.5, garbage: 0.5, timeout: 0.3, ECONNRESET: 0.15 };
+        const text = (code, words) => Buffer.concat([Buffer.from([0x12, 4 + words.length, 0x08, code, 0x12, words.length]), Buffer.from(words)]).toString('hex');
+        const body = {
+            // (as they came: the 4 bare, the 7 with its text; and each the other way, the text in another case)
+            status4: () => weighted(r, [['12020804', 8], [text(4, 'deadline exceeded'), 2]]),
+            status7: () => weighted(r, [[text(7, 'authentication failed'), 7], ['12020807', 2], [text(7, 'Authentication Failed'), 1]]),
+            status: () => pick(r, ['12020805', '1202080d', text(14, 'unavailable'), '1200', '1203088400', text(7, 'authentication failed') + '00']),
+            garbage: () => pick(r, ['ffffffff', '3c68746d6c3e', '0a7f01', '120208'])
+        };
         return {
             kind: kind,
             ms: Math.round(1000 * (seconds[kind] || (() => between(r, 0.1, 6)))()),
             applied: r() < (applied[kind] || 0),
             share: between(r, 0.2, 1),
-            body: body[kind] ? body[kind]() : kind == 'status4' ? '12020804' : ''
+            body: body[kind] ? body[kind]() : ''
         };
     },
     // When Nest's message about a change arrives (ms after the change), or never
@@ -160,6 +171,10 @@ const DRAWS = {
     // Whether a reauthentication succeeds
     auth(r) {
         return r() < 0.75;
+    },
+    // ... and how long it takes (ms)
+    authTime(r) {
+        return Math.round(weighted(r, [[between(r, 200, 3000), 70], [between(r, 3000, 20000), 20], [between(r, 45000, 90000), 10]]));
     }
 };
 
@@ -289,7 +304,7 @@ function create(deps) {
         fs.rmSync(env.dir, { recursive: true, force: true });
     }
 
-    // options: { status4Lost: false } for a version of the plugin that takes the bare status 4 for success (then
+    // options: { status4Lost: false } for a version of the plugin that takes a bare status 4 or 7 for success (then
     // such a change does not count as lost); { trace: true } keeps what happened, for reading
     async function run(scenario, options) {
         options = options || {};
@@ -305,7 +320,7 @@ function create(deps) {
 
         const world = env.world = {
             violations: [], lines: [], kept: [], requests: [], commits: [], steps: [], events: [],
-            open: 0, model: 0, restarts: 0, auths: 0, echoes: 0, rejected: 0, latest: {}, sent: {}, groups: {}, reported: {}, dropped: []
+            open: 0, model: 0, restarts: 0, auths: 0, reauthenticated: 0, echoes: 0, rejected: 0, latest: {}, sent: {}, groups: {}, reported: {}, dropped: [], taken: [], answeredAt: 0
         };
         world.violation = (invariant, text) => {
             if (!world.violations.some(el => el.invariant == invariant)) {
@@ -337,10 +352,33 @@ function create(deps) {
         conn.token = 'token';
         conn.transport_url = 'https://transport.invalid';
         conn.userid = 'user';
-        conn.auth = () => {
-            const ok = draw(scenario, 'auth', world.auths++);
-            note('reauthentication ' + (ok ? 'succeeds' : 'fails'));
-            return ok ? Promise.resolve(true) : Promise.reject(new Error('reauthentication failed'));
+        // A reauthentication, as Connection.auth: one attempt at a time, shared. It takes a while. Unless it is one
+        // that keeps the session (preemptive), the plugin has none meanwhile, and pushes wait for it. It fails by
+        // resolving false if it kept the session, by throwing otherwise (the plugin's retry of a failed push then
+        // waits and pushes all the same).
+        conn.auth = preemptive => {
+            if (!conn.authPromise) {
+                const index = world.auths++;
+                const ok = draw(scenario, 'auth', index), ms = draw(scenario, 'authTime', index);
+                note('reauthentication' + (preemptive ? ', keeping the session' : '') + ': ' + (ok ? 'succeeds' : 'fails') + ' after ' + ms / 1000 + ' s');
+                if (!preemptive) {
+                    conn.connected = false;
+                    conn.token = null;
+                }
+                conn.authPromise = new Promise((resolve, reject) => later(ms, () => {
+                    conn.connected = true;
+                    conn.token = 'token';
+                    conn.authPromise = null;
+                    world.reauthenticated += ok ? 1 : 0;
+                    if (ok || preemptive) {
+                        resolve(ok);
+                    } else {
+                        reject(new Error('reauthentication failed'));
+                    }
+                }));
+                conn.authPromise.catch(() => {});
+            }
+            return conn.authPromise;
         };
         const nest = {};
         const device = id => ({
@@ -389,7 +427,7 @@ function create(deps) {
                     const commit = { seq: seq, at: clock.now, object: nodeId, key: key, value: copy(body[key]), accepted: false, dropped: false, reported: false, resent: false, flying: 0, last: null };
                     // What I1 counts: per change, or (modes and eco: a value comes back) per value of the setting
                     const name = typeof body[key] == 'number' ? '#' + seq : nodeId + '/' + key + '=' + JSON.stringify(body[key]);
-                    commit.group = world.groups[name] = world.groups[name] || { changes: 0, sends: 0, errors: 0, status4: 0 };
+                    commit.group = world.groups[name] = world.groups[name] || { changes: 0, sends: 0, errors: 0, lost: 0 };
                     commit.group.changes++;
                     world.commits.push(commit);
                     world.latest[settingKey(commit)] = commit;
@@ -504,8 +542,13 @@ function create(deps) {
             const from = text.indexOf(' - sending ');
             if (from >= 0 && / again/.test(text.slice(from))) {
                 const whole = text.slice(from).startsWith(' - sending it again');
-                named(whole ? text.slice(0, text.indexOf(' (status 4 after ')) : text.slice(from, text.indexOf(' again', from))).forEach(({ commit }) => {
+                named(whole ? text.slice(0, text.search(/ \(status \d after /)) : text.slice(from, text.indexOf(' again', from))).forEach(({ commit }) => {
                     commit.resent = true;
+                    commit.resentAt = clock.now;
+                    // I14. After a status 7 a change is sent again only once a reauthentication has succeeded since.
+                    if (/ \(status 7 after /.test(text) && commit.before7 !== undefined && world.reauthenticated <= commit.before7) {
+                        world.violation('I14', 'change #' + commit.seq + ' (' + settingKey(commit) + ') is sent again after a status 7 without a reauthentication');
+                    }
                 });
             }
         };
@@ -627,7 +670,7 @@ function create(deps) {
                 request.answered = clock.now;
                 answered(request, answer);
                 note('request ' + number + ' answered: ' + answer.kind);
-                if (['ok', 'status4', 'status', 'garbage'].includes(answer.kind)) {
+                if (ANSWERED.includes(answer.kind)) {
                     resolve({ data: Buffer.from(answer.body, 'hex'), status: 200, statusText: 'OK', headers: {}, config: config });
                 } else {
                     const error = new Error(answer.kind);
@@ -672,8 +715,8 @@ function create(deps) {
                 // I1. A change is sent once; once more for each request carrying it that failed in a way the plugin
                 // retries; and at most RESEND_MAX times more because Nest answered a request carrying it with the
                 // bare status 4.
-                if (group.sends > group.changes + group.errors + Math.min(group.status4, RESEND_MAX * group.changes)) {
-                    world.violation('I1', 'request ' + request.number + ' is send ' + group.sends + ' of change #' + commit.seq + ' (' + settingKey(commit) + '=' + JSON.stringify(commit.value) + (group.changes > 1 ? ', made ' + group.changes + ' times' : '') + '), after ' + group.errors + ' failed request(s) and ' + group.status4 + ' status 4');
+                if (group.sends > group.changes + group.errors + Math.min(group.lost, RESEND_MAX * group.changes)) {
+                    world.violation('I1', 'request ' + request.number + ' is send ' + group.sends + ' of change #' + commit.seq + ' (' + settingKey(commit) + '=' + JSON.stringify(commit.value) + (group.changes > 1 ? ', made ' + group.changes + ' times' : '') + '), after ' + group.errors + ' failed request(s) and ' + group.lost + ' status 4 or 7');
                 }
                 // I2. Never an older value of a setting after a newer one has been sent. (P2: the same, where the
                 // request is not one sent again after a status 4 but the plugin's retry of a failed request, or a
@@ -681,6 +724,7 @@ function create(deps) {
                 const last = world.sent[settingKey(commit)];
                 const again = commit.resent;
                 commit.resent = false;
+                commit.resentIn = again ? request.number : commit.resentIn;
                 if (last && last.seq > commit.seq && same(last.value, commit.value)) {
                     // The newer change asked for the same value (to what Nest can tell): nothing older about it
                 } else if (last && last.seq > commit.seq) {
@@ -695,15 +739,22 @@ function create(deps) {
             for (const commit of request.carries) {
                 commit.flying--;
                 commit.last = answer.kind;
-                if (answer.kind == 'status4' && !off && options.status4Lost !== false) {
-                    commit.group.status4++;
-                } else if (['ok', 'status4', 'status', 'garbage'].includes(answer.kind)) {
+                // (For I15: a resend answered as taken, no other request having been answered since it was decided)
+                if (commit.resentIn == request.number && ANSWERED.includes(answer.kind) && !LOST.includes(answer.kind) && world.answeredAt <= commit.resentAt) {
+                    world.taken.push({ commit: commit, at: clock.now });
+                }
+                if (LOST.includes(answer.kind) && !off && options.status4Lost !== false) {
+                    commit.group.lost++;
+                    // (For I14: how many reauthentications had succeeded when a status 7 came)
+                    commit.before7 = answer.kind == 'status7' ? world.reauthenticated : undefined;
+                } else if (ANSWERED.includes(answer.kind)) {
                     commit.accepted = true;
                 } else if (answer.kind == '401' || answer.kind == '403' || RETRYABLE_CODES.includes(answer.kind == 'timeout' ? 'ECONNABORTED' : answer.kind)) {
                     commit.group.errors++;
                 }
             }
-            world.failed = world.failed || !['ok', 'status4', 'status', 'garbage'].includes(answer.kind);
+            world.failed = world.failed || !ANSWERED.includes(answer.kind);
+            world.answeredAt = clock.now;
         };
 
         // ---- HomeKit
@@ -793,6 +844,15 @@ function create(deps) {
                     world.violation(world.failed ? 'P8' : 'I8', 'change #' + commit.seq + ' (' + key + '=' + JSON.stringify(commit.value) + ') is on its way to Nest, but HomeKit is shown ' + JSON.stringify(showing(commit)));
                 }
             }
+            // I15. A change sent again was waiting to be pushed until its answer, and its 300 s echo wait counts from
+            // that answer. (Where no other request was answered since the status 4 or 7: any answered push settles
+            // every change made before it started.)
+            for (const { commit, at } of world.taken.splice(0)) {
+                const update = conn.mergeUpdates.find(update => update.object.object_key == commit.object && exact(update.object.value[commit.key], commit.value));
+                if (update && typeof commit.value == 'number' && (!update.pushed || update.expiry_time != at + ECHO_MAX_MS)) {
+                    world.violation('I15', 'change #' + commit.seq + ' (' + settingKey(commit) + '=' + JSON.stringify(commit.value) + '), sent again and taken, is ' + (update.pushed ? 'held for ' + (update.expiry_time - now) / 1000 + ' s' : 'still waiting to be pushed'));
+                }
+            }
             // I10. Once the log has said a change was NOT applied, it is no longer held. (P10: the same after a line
             // of the plugin's older paths.)
             for (const { commit, resend, named } of world.dropped.splice(0)) {
@@ -875,7 +935,7 @@ function create(deps) {
                     // where it never went out because a failed push, queued again in front of it, wrote over it: the
                     // plugin's older paths. In a single mode a failed push is queued again as it was sent, as one
                     // target temperature, and a second threshold written with it is never sent.)
-                    world.violation((commit.last && commit.last != 'status4') || commit.overridden ? 'P3' : 'I3', 'change #' + commit.seq + ' (' + settingKey(commit) + '=' + JSON.stringify(commit.value) + ', made at ' + (commit.at - start) / 1000 + ' s) was sent ' + commit.group.sends + ' time(s), never taken by Nest, and nothing says it was lost');
+                    world.violation((commit.last && !LOST.includes(commit.last)) || commit.overridden ? 'P3' : 'I3', 'change #' + commit.seq + ' (' + settingKey(commit) + '=' + JSON.stringify(commit.value) + ', made at ' + (commit.at - start) / 1000 + ' s) was sent ' + commit.group.sends + ' time(s), never taken by Nest, and nothing says it was lost');
                 }
             }
             // I2, at rest: the last value sent for a setting is the last one asked for, unless that was lost.
@@ -912,6 +972,7 @@ function create(deps) {
             violations: world.violations,
             requests: world.requests.length,
             status4: world.requests.filter(request => request.answer == 'status4').length,
+            status7: world.requests.filter(request => request.answer == 'status7').length,
             // How often each thing the test is about happened
             happened: {
                 resent: world.kept.filter(line => / - sending .* again/.test(line)).length,
@@ -919,6 +980,8 @@ function create(deps) {
                 notResent: world.kept.filter(line => /not sending it again: a newer change/.test(line)).length,
                 switchedOff: world.kept.filter(line => /not sending it again: nest-no-resend/.test(line)).length,
                 lost: world.kept.filter(line => /NOT applied/.test(line)).length,
+                reauthFailed: world.kept.filter(line => /the reauthentication failed/.test(line)).length,
+                status7: world.requests.filter(request => request.answer == 'status7').length,
                 refreshes: world.kept.filter(line => /has not echoed/.test(line)).length,
                 rejectedWrites: world.rejected
             },
