@@ -1,9 +1,8 @@
 'use strict';
 
-// A change Nest answers with nothing but a status 4 or 7 was not applied: it is sent again at once (after a status 7,
-// once the plugin has reauthenticated), once, and dropped (and said to be lost) if Nest answers that again. Never a
-// value a newer change has replaced. Any other answer is taken as before, and so are those two while
-// nest-no-resend.on exists in the storage directory.
+// A change Nest answers with nothing but a status 4 or 7 was not applied: it is sent again at once, once, and
+// dropped (and said to be lost) if Nest answers that again. Never a value a newer change has replaced. Any other
+// answer is taken as before, and so are those two while nest-no-resend.on exists in the storage directory.
 // 2026-10-11 01:31:18Z: the downstairs pair was written (low 18.9, high 22.8), Nest answered after 15.6 s with
 // HTTP 200 and the four bytes 12 02 08 04, and 300 s later its state was still 21.1.
 // 2026-10-11 07:17:22Z: the upstairs pair (low 20.6, high 22.2) was answered after 20.4 s with HTTP 200 and 27 bytes,
@@ -51,7 +50,7 @@ const turn = () => new Promise(resolve => realSetTimeout(resolve, 1));
 
 // Everything a case touches outside its connection: the clock, the timers it leaves, the delays pushUpdates asks for
 // and the requests it sends (answered by the case, in the order and at the times it chooses)
-const env = { now: 0, live: new Set(), timers: new Map(), world: null };
+const env = { now: 0, live: new Set(), world: null };
 
 async function until(condition, what) {
     for (let i = 0; i < 500; i++) {
@@ -84,9 +83,8 @@ async function makeWorld(storagePath) {
     conn.token = 'token';
     conn.transport_url = 'https://transport.invalid';
     conn.pushUpdatesDebounced = () => {};
-    // (preemptive: without letting go of the session first, as ahead of a token's end)
-    conn.auth = preemptive => {
-        lines.push('reauthentication' + (preemptive ? ', keeping the session' : ''));
+    conn.auth = () => {
+        lines.push('reauthentication');
         return Promise.resolve(true);
     };
     const thermostat = () => ({ target_temperature_type: 'range', can_heat: true, can_cool: true, eco: { mode: 'schedule' } });
@@ -848,7 +846,8 @@ const cases = {
 
     // Only the two answers, read strictly: nothing but a status, its code 4 or 7, with or without a text. For each
     // body, which side it falls on: 0 = taken as any answer was before (one request, the change pushed and held for
-    // its 300 s echo wait, nothing said); 4 = sent again at once; 7 = sent again after a reauthentication.
+    // its 300 s echo wait, nothing said); 4 or 7 = sent again at once, the line naming that status. No answer
+    // makes the plugin reauthenticate.
     async 'which answers are the two, and which are not'() {
         const status = (...fields) => field(2, Buffer.concat(fields));
         const code = number => Buffer.from([0x08, number]);
@@ -908,11 +907,10 @@ const cases = {
             await world.sent(1);
             world.answer(1, body, 15.6);
             await world.sent(side ? 2 : 1);
-            assert.strictEqual(world.lines.filter(line => line == 'reauthentication, keeping the session').length, side == 7 ? 1 : 0, name);
             assert.strictEqual(world.lines.filter(line => line == 'reauthentication').length, 0, name);
             if (side) {
                 assert.deepStrictEqual(world.requests[1].carries, ['dn RANGE 18.9/22.8'], name);
-                assert.ok(world.said().some(line => line == 'info Nest did not apply the change ' + DN_PAIR + ' (status ' + side + ' after 15.6 s) - sending it again' + (side == 7 ? ' after reauthenticating' : '') + ' (attempt 2 of 2).'), name + ': ' + world.said().join('\n'));
+                assert.ok(world.said().some(line => line == 'info Nest did not apply the change ' + DN_PAIR + ' (status ' + side + ' after 15.6 s) - sending it again (attempt 2 of 2).'), name + ': ' + world.said().join('\n'));
                 world.answer(2, landed([DN]), 3.3);
             } else {
                 assert.deepStrictEqual(world.said(), [], name);
@@ -928,10 +926,16 @@ const cases = {
         }
     },
 
-    // The second lost write, as it happened, and then Nest applying it when it is sent again
-    async 'status 7, then a normal answer: reauthenticated, sent again with the same values, left as a landed write'() {
+    // The second lost write, as it happened, and then Nest applying it when it is sent again. A status 7 is handled
+    // exactly as a status 4: sent again at once, and the plugin does not reauthenticate because of it.
+    async 'status 7, then a normal answer: sent again at once with the same values, left as a landed write'() {
         const world = await makeWorld();
         const conn = world.conn;
+        let reauthentications = 0;
+        conn.auth = () => {
+            reauthentications++;
+            return Promise.resolve(true);
+        };
         const start = env.now;
         writePair(conn, UP, 20.6, 22.2);
         const push = conn.pushUpdates();
@@ -939,9 +943,10 @@ const cases = {
         world.answer(1, AUTH_FAILED, 20.4);
         await world.sent(2);
         assert.deepStrictEqual(world.requests.map(request => request.carries), [['up RANGE 20.6/22.2'], ['up RANGE 20.6/22.2']]);
-        assert.strictEqual(world.requests[1].sent, start + 20400, 'sent again as soon as the plugin has reauthenticated');
+        assert.strictEqual(world.requests[1].sent, start + 20400, 'sent again at once');
         assert.deepStrictEqual(held(conn), ['up {"low":20.6} waiting 120', 'up {"high":22.2} waiting 120']);
         assert.deepStrictEqual(showing(conn).up, '20.6/22.2 range');
+        assert.strictEqual(timers(conn), 1, 'no timer but the merge timer');
         world.answer(2, landed([UP]), 3.3);
         await push;
         assert.deepStrictEqual(held(conn), ['up {"low":20.6} pushed 300', 'up {"high":22.2} pushed 300']);
@@ -950,57 +955,15 @@ const cases = {
         assert.deepStrictEqual(world.lines, [
             // (the first is the line of 2026-10-11 07:17:22Z, but for the device id)
             'info Nest answered the change ' + UP_PAIR + ' after 20.4 s (slow): HTTP 200, 27 byte(s), status 7, starts 12190807121561757468656e7469636174696f6e206661696c6564.',
-            'info Nest did not apply the change ' + UP_PAIR + ' (status 7 after 20.4 s) - reauthenticating before it is sent again.',
-            'reauthentication, keeping the session',
-            'info Nest did not apply the change ' + UP_PAIR + ' (status 7 after 20.4 s) - sending it again after reauthenticating (attempt 2 of 2).',
+            'info Nest did not apply the change ' + UP_PAIR + ' (status 7 after 20.4 s) - sending it again (attempt 2 of 2).',
             'info Nest answered the change ' + UP_PAIR + ' after 3.3 s: HTTP 200, 113 byte(s), operation (progress none, status none), status 0, starts 0a6d0a6b0a5c0a174445564943455f' + Buffer.from(UP).toString('hex') + '12.',
             'info Sent again, the change ' + UP_PAIR + ' was answered after 3.3 s without status 4 or 7 (attempt 2 of 2).'
         ]);
-        assert.strictEqual(timers(conn), 1, 'the timer that limits the reauthentication is gone');
+        assert.strictEqual(reauthentications, 0, 'no authentication call because of a status 7');
         env.now += 2000;
         frame(conn, UP, 20.6, 22.2);
         assert.ok(world.shown.every(shown => shown.up == '20.6/22.2 range'), JSON.stringify(world.shown));
         assert.strictEqual(timers(conn), 0);
-    },
-
-    // The reauthentication fails (as the plugin's does: it says so), throws, or is still going on after 40 s: the
-    // change is not sent again. Dropped, said to be lost, and the session is left as it was.
-    async 'status 7 and the reauthentication fails: not sent again, dropped and said to be lost'() {
-        for (const how of ['says it failed', 'throws', 'takes more than 40 s']) {
-            const world = await makeWorld();
-            const conn = world.conn;
-            let asked = 0;
-            conn.auth = preemptive => {
-                asked++;
-                assert.strictEqual(preemptive, true, 'without letting go of the session');
-                return how == 'says it failed' ? Promise.resolve(false) : how == 'throws' ? Promise.reject(new Error('no')) : new Promise(() => {});
-            };
-            writePair(conn, UP, 20.6, 22.2);
-            const push = conn.pushUpdates();
-            await world.sent(1);
-            world.answer(1, AUTH_FAILED, 20.4);
-            await quiet();
-            if (how == 'takes more than 40 s') {
-                assert.deepStrictEqual(showing(conn).up, '20.6/22.2 range', 'held meanwhile');
-                assert.deepStrictEqual(held(conn), ['up {"low":20.6} waiting 99.6', 'up {"high":22.2} waiting 99.6']);
-                env.pass(40000);
-            }
-            await push;
-            await quiet();
-            assert.strictEqual(asked, 1, how);
-            assert.strictEqual(world.requests.length, 1, how);
-            assert.deepStrictEqual(held(conn), [], how);
-            assert.deepStrictEqual(showing(conn).up, '20/22.2 range', how);
-            assert.deepStrictEqual(world.shown[world.shown.length - 1].up, '20/22.2 range', how);
-            assert.deepStrictEqual(world.said(), [
-                'info Nest did not apply the change ' + UP_PAIR + ' (status 7 after 20.4 s) - reauthenticating before it is sent again.',
-                'error Nest did not apply the change ' + UP_PAIR + ' (status 7 after 20.4 s), and the reauthentication failed (or did not finish within 40 s), so it is not sent again - these changes were NOT applied: ' + UP_PAIR
-            ], how);
-            assert.strictEqual(conn.connected, true, how);
-            assert.strictEqual(conn.token, 'token', how);
-            assert.strictEqual(conn.failedPushAPICalls, 0, how);
-            assert.strictEqual(timers(conn), 0, how);
-        }
     },
 
     // One change is sent again once, whichever of the two answers come
@@ -1021,10 +984,9 @@ const cases = {
             assert.strictEqual(world.requests.length, 2, name);
             assert.deepStrictEqual(held(conn), [], name);
             assert.deepStrictEqual(showing(conn).up, '20/22.2 range', name);
-            // No reauthentication for an answer after which nothing can be sent again
-            assert.strictEqual(world.lines.filter(line => /^reauthentication/.test(line)).length, first == 7 ? 1 : 0, name);
-            assert.deepStrictEqual(world.said().slice(-2), [
-                'info Nest did not apply the change ' + UP_PAIR + ' (status ' + first + ' after 20.4 s) - sending it again' + (first == 7 ? ' after reauthenticating' : '') + ' (attempt 2 of 2).',
+            assert.strictEqual(world.lines.filter(line => /^reauthentication/.test(line)).length, 0, name);
+            assert.deepStrictEqual(world.said(), [
+                'info Nest did not apply the change ' + UP_PAIR + ' (status ' + first + ' after 20.4 s) - sending it again (attempt 2 of 2).',
                 'error Nest did not apply the change ' + UP_PAIR + ' (status ' + second + ' after 15.6 s) when it was sent again (attempt 2 of 2) - these changes were NOT applied: ' + UP_PAIR
             ], name);
             assert.strictEqual(timers(conn), 0, name);
@@ -1046,65 +1008,64 @@ const cases = {
         await push;
         await quiet();
         assert.strictEqual(world.requests.length, 3);
-        assert.deepStrictEqual(world.lines.filter(line => /^reauthentication/.test(line)), ['reauthentication, keeping the session', 'reauthentication']);
+        // (the one reauthentication is the 401's, as for any failed push)
+        assert.deepStrictEqual(world.lines.filter(line => /^reauthentication/.test(line)), ['reauthentication']);
         assert.deepStrictEqual(held(conn), []);
         assert.ok(/^error .* \(status 7 after 20\.4 s\) when it was sent again \(attempt 2 of 2\) - these changes were NOT applied: /.test(world.said()[world.said().length - 1]), world.said().join('\n'));
         assert.strictEqual(timers(conn), 0);
     },
 
-    // What is sent again is decided when the plugin has reauthenticated, not when the answer came
-    async 'status 7, and a newer change made during the reauthentication: the older value is not sent again'() {
-        // A setpoint: the newer one is queued, and goes out with what is sent again
+    // As after a status 4: a newer change made while what was sent again is unanswered replaces it
+    async 'status 7, and a newer change made while it is being sent again: the older value is not sent a third time'() {
+        // Both setpoints written again: the newer pair goes out by its own push
         {
             const world = await makeWorld();
             const conn = world.conn;
-            let reauthenticated = null;
-            conn.auth = () => new Promise(resolve => {
-                reauthenticated = resolve;
-            });
             writePair(conn, UP, 20.6, 22.2);
             const push = conn.pushUpdates();
             await world.sent(1);
             world.answer(1, AUTH_FAILED, 20.4);
-            await until(() => reauthenticated, 'the reauthentication');
-            env.now += 3000;
-            set(conn, UP, HIGH, 22.8);
-            assert.strictEqual(env.live.size, 2, 'the merge timer and the one that limits the reauthentication');
-            reauthenticated(true);
             await world.sent(2);
-            assert.deepStrictEqual(world.requests[1].carries, ['up RANGE 20.6/22.8']);
-            assert.ok(world.said().some(line => / - sending shared\.AAAA000000000001 \{"target_temperature_low":20\.6\} again after reauthenticating \(the rest is not: /.test(line)), world.said().join('\n'));
-            world.answer(2, landed([UP]), 3.3);
+            env.now += 3000;
+            writePair(conn, UP, 21.1, 22.8);
+            const newer = conn.pushUpdates();
+            await world.sent(3);
+            assert.deepStrictEqual(world.requests[2].carries, ['up RANGE 21.1/22.8']);
+            world.answer(3, landed([UP]), 3.3);
+            await newer;
+            world.lines.length = 0;
+            world.answer(2, AUTH_FAILED, 15.6);
             await push;
-            assert.deepStrictEqual(held(conn), ['up {"low":20.6} pushed 300', 'up {"high":22.8} pushed 300']);
-            assert.strictEqual(world.requests.length, 2);
+            await quiet();
+            assert.strictEqual(world.requests.length, 3, '20.6/22.2 is not sent after 21.1/22.8 was');
+            assert.deepStrictEqual(world.said(), ['info Nest did not apply the change ' + UP_PAIR + ' (status 7 after 15.6 s) - not sending it again: a newer change has replaced it.']);
+            assert.deepStrictEqual(showing(conn).up, '21.1/22.8 range');
+            assert.deepStrictEqual(held(conn).map(line => line.replace(/ [\d.]+$/, '')), ['up {"low":21.1} pushed', 'up {"high":22.8} pushed']);
             clearTimeout(conn.mergeEndTimer);
         }
         // A mode change: the newer one has gone out by itself
         {
             const world = await makeWorld();
             const conn = world.conn;
-            let reauthenticated = null;
-            conn.auth = () => new Promise(resolve => {
-                reauthenticated = resolve;
-            });
             setMode(conn, UP, 'heat');
             await world.sent(2);
             world.answer(1, Buffer.alloc(0), 2);
             world.answer(2, AUTH_FAILED, 20.4);
-            await until(() => reauthenticated, 'the reauthentication');
+            await world.sent(3);
+            assert.deepStrictEqual(world.requests[2].carries, ['up HEAT 20/22.2'], 'heat, sent again');
             env.now += 3000;
             setMode(conn, UP, 'cool');
-            await world.sent(4);
-            assert.deepStrictEqual(world.requests[3].carries, ['up COOL 20/22.2']);
-            reauthenticated(true);
+            await world.sent(5);
+            assert.deepStrictEqual(world.requests[4].carries, ['up COOL 20/22.2']);
+            world.answer(3, AUTH_FAILED, 15.6);
             await quiet();
-            assert.strictEqual(world.requests.length, 4, 'heat is not sent again');
-            assert.ok(/\(status 7 after 20\.4 s\) - not sending it again: a newer change has replaced it\.$/.test(world.said()[world.said().length - 1]), world.said().join('\n'));
+            assert.strictEqual(world.requests.length, 5, 'heat is not sent a third time');
+            assert.ok(/\(status 7 after 15\.6 s\) - not sending it again: a newer change has replaced it\.$/.test(world.said()[world.said().length - 1]), world.said().join('\n'));
             assert.deepStrictEqual(showing(conn).up, '20/22.2 cool');
-            world.answer(3, Buffer.alloc(0), 2);
-            world.answer(4, landed([UP]), 2);
+            world.answer(4, Buffer.alloc(0), 13);
+            world.answer(5, landed([UP]), 13);
             await quiet();
+            assert.strictEqual(world.lines.filter(line => /^reauthentication/.test(line)).length, 0);
             clearTimeout(conn.mergeEndTimer);
         }
     },
@@ -1135,7 +1096,7 @@ const cases = {
         }
     },
 
-    async 'nest-no-resend.on and a status 7: one request, no reauthentication, taken as a landed write'() {
+    async 'nest-no-resend.on and a status 7: one request, taken as a landed write'() {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nest-no-resend-'));
         try {
             fs.writeFileSync(path.join(dir, 'nest-no-resend.on'), '');
@@ -1509,27 +1470,14 @@ async function withEnvironment(fn) {
     global.setTimeout = (fn, ms, ...args) => {
         const handle = realSetTimeout(() => {
             env.live.delete(handle);
-            env.timers.delete(handle);
             fn(...args);
         }, ms);
         env.live.add(handle);
-        env.timers.set(handle, { ms: ms, run: () => fn(...args) });
         return handle;
     };
     global.clearTimeout = handle => {
         env.live.delete(handle);
-        env.timers.delete(handle);
         realClearTimeout(handle);
-    };
-    // Lets the timers set for `ms` run now
-    env.pass = ms => {
-        for (const [handle, timer] of Array.from(env.timers)) {
-            if (timer.ms == ms) {
-                global.clearTimeout(handle);
-                env.now += ms;
-                timer.run();
-            }
-        }
     };
     try {
         return await fn();

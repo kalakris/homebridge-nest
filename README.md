@@ -79,16 +79,15 @@ Differences from upstream:
   Before 4.6.10-ha.8 that counted as success: the written value stayed in HomeKit for 300 s, until a fresh read
   showed Nest's. Now a change answered with nothing but a status 4 or a status 7 (with or without a text: so a
   status 4 with a text counts too, though none has been seen) is sent again, built afresh from the current state,
-  and HomeKit keeps the written value meanwhile. After a status 4 at once; after a status 7 once the plugin has
-  reauthenticated (without letting go of its session meanwhile, as it does ahead of a token's end; if that fails or
-  takes more than 40 s the change is not sent again, and is dropped and logged as below). Each change is sent again
-  once, whichever of the two answers come. Never a value that is not the last one asked for: once a newer change to
-  the same setting has been made, whatever became of it, the older value is neither sent again nor shown any
-  longer. If Nest answers a status 4 or 7 again, the change is dropped, HomeKit shows Nest's state at once and the
-  log says `these changes were NOT applied`, as for a push that failed. The same line is logged, and nothing sent,
-  for a change that is no longer held when the answer comes because Nest has reported another value for the setting
-  meanwhile (someone else changed it). Any other answer (another status; a status 4 or 7 with anything more than
-  its code and a text, or longer than 129 bytes; results per change; anything unreadable) is taken as before. Every
+  and HomeKit keeps the written value meanwhile. At once, after either status: a status 7 is handled exactly as a
+  status 4, and the plugin does not reauthenticate because of it. Each change is sent again once, whichever of the
+  two answers come. Never a value that is not the last one asked for: once a newer change to the same setting has
+  been made, whatever became of it, the older value is neither sent again nor shown any longer. If Nest answers a
+  status 4 or 7 again, the change is dropped, HomeKit shows Nest's state at once and the log says `these changes
+  were NOT applied`, as for a push that failed. The same line is logged, and nothing sent, for a change that is no
+  longer held when the answer comes because Nest has reported another value for the setting meanwhile (someone
+  else changed it). Any other answer (another status; a status 4 or 7 with anything more than its code and a
+  text, or longer than 129 bytes; results per change; anything unreadable) is taken as before. Every
   line names the status: look for `Nest did not apply the change`, `(status 4 after`, `(status 7 after` and
   `Sent again`.
   To switch all of it off without a restart, create a file `nest-no-resend.on` in the Homebridge storage directory
