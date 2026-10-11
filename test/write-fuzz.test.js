@@ -38,7 +38,7 @@ module.exports = async function() {
     }
     assert.deepStrictEqual(broken, []);
     // The scenarios did go through what the test is about
-    for (const name of ['resent', 'givenUp', 'notResent', 'switchedOff', 'lost', 'reauthFailed', 'status7', 'refreshes']) {
+    for (const name of ['resent', 'givenUp', 'notResent', 'switchedOff', 'lost', 'status7', 'refreshes']) {
         assert.ok(happened[name] >= 20, name + ': ' + happened[name]);
     }
 };

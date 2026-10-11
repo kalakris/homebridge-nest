@@ -17,7 +17,7 @@
 // while, and can fail. Messages from Nest: in order, or (profile "lossy") late, never, or out of
 // order; a restarted stream opens with Nest's full state.
 //
-// What is checked is in check() and settle() below, numbered I1 to I15.
+// What is checked is in check() and settle() below, and in the reauthentication here, numbered I1 to I15.
 
 const crypto = require('crypto');
 const fs = require('fs');
@@ -320,7 +320,7 @@ function create(deps) {
 
         const world = env.world = {
             violations: [], lines: [], kept: [], requests: [], commits: [], steps: [], events: [],
-            open: 0, model: 0, restarts: 0, auths: 0, reauthenticated: 0, echoes: 0, rejected: 0, latest: {}, sent: {}, groups: {}, reported: {}, dropped: [], taken: [], settles: 0
+            open: 0, model: 0, restarts: 0, auths: 0, echoes: 0, rejected: 0, latest: {}, sent: {}, groups: {}, reported: {}, dropped: [], taken: [], settles: 0
         };
         world.violation = (invariant, text) => {
             if (!world.violations.some(el => el.invariant == invariant)) {
@@ -352,26 +352,27 @@ function create(deps) {
         conn.token = 'token';
         conn.transport_url = 'https://transport.invalid';
         conn.userid = 'user';
-        // A reauthentication, as Connection.auth: one attempt at a time, shared. It takes a while. Unless it is one
-        // that keeps the session (preemptive), the plugin has none meanwhile, and pushes wait for it. It fails by
-        // resolving false if it kept the session, by throwing otherwise (the plugin's retry of a failed push then
-        // waits and pushes all the same).
-        conn.auth = preemptive => {
+        // A reauthentication, as Connection.auth: one attempt at a time, shared. It takes a while; the plugin has
+        // no session meanwhile, and pushes wait for it. It fails by throwing (the plugin's retry of a failed push
+        // then waits and pushes all the same).
+        conn.auth = () => {
+            // I14. The plugin reauthenticates only after a request has failed: a status 4 or 7 is an answer, and no
+            // reason to.
+            if (!world.failed) {
+                world.violation('I14', 'a reauthentication though no request has failed');
+            }
             if (!conn.authPromise) {
                 const index = world.auths++;
                 const ok = draw(scenario, 'auth', index), ms = draw(scenario, 'authTime', index);
-                note('reauthentication' + (preemptive ? ', keeping the session' : '') + ': ' + (ok ? 'succeeds' : 'fails') + ' after ' + ms / 1000 + ' s');
-                if (!preemptive) {
-                    conn.connected = false;
-                    conn.token = null;
-                }
+                note('reauthentication: ' + (ok ? 'succeeds' : 'fails') + ' after ' + ms / 1000 + ' s');
+                conn.connected = false;
+                conn.token = null;
                 conn.authPromise = new Promise((resolve, reject) => later(ms, () => {
                     conn.connected = true;
                     conn.token = 'token';
                     conn.authPromise = null;
-                    world.reauthenticated += ok ? 1 : 0;
-                    if (ok || preemptive) {
-                        resolve(ok);
+                    if (ok) {
+                        resolve(true);
                     } else {
                         reject(new Error('reauthentication failed'));
                     }
@@ -551,10 +552,6 @@ function create(deps) {
                 named(whole ? text.slice(0, text.search(/ \(status \d after /)) : text.slice(from, text.indexOf(' again', from))).forEach(({ commit }) => {
                     commit.resent = true;
                     commit.resentAt = world.settles;
-                    // I14. After a status 7 a change is sent again only once a reauthentication has succeeded since.
-                    if (/ \(status 7 after /.test(text) && commit.before7 !== undefined && world.reauthenticated <= commit.before7) {
-                        world.violation('I14', 'change #' + commit.seq + ' (' + settingKey(commit) + ') is sent again after a status 7 without a reauthentication');
-                    }
                 });
             }
         };
@@ -752,8 +749,6 @@ function create(deps) {
                 }
                 if (LOST.includes(answer.kind) && !off && options.status4Lost !== false) {
                     commit.group.lost++;
-                    // (For I14: how many reauthentications had succeeded when a status 7 came)
-                    commit.before7 = answer.kind == 'status7' ? world.reauthenticated : undefined;
                 } else if (ANSWERED.includes(answer.kind)) {
                     commit.accepted = true;
                 } else if (answer.kind == '401' || answer.kind == '403' || RETRYABLE_CODES.includes(answer.kind == 'timeout' ? 'ECONNABORTED' : answer.kind)) {
@@ -986,7 +981,8 @@ function create(deps) {
                 notResent: world.kept.filter(line => /not sending it again: a newer change/.test(line)).length,
                 switchedOff: world.kept.filter(line => /not sending it again: nest-no-resend/.test(line)).length,
                 lost: world.kept.filter(line => /NOT applied/.test(line)).length,
-                reauthFailed: world.kept.filter(line => /the reauthentication failed/.test(line)).length,
+                // (the plugin reauthenticates after a failed request only: never where none fails)
+                reauthentications: world.auths,
                 status7: world.requests.filter(request => request.answer == 'status7').length,
                 refreshes: world.kept.filter(line => /has not echoed/.test(line)).length,
                 rejectedWrites: world.rejected
