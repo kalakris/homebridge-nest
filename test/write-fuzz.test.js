@@ -25,7 +25,7 @@ module.exports = async function() {
         // out: a change that went out with another's resend and is given up later; with failing requests, a value
         // that is not the last one asked for, and a newer value written into a change queued for its retry)
         const seeds = Array.from({ length: 200 }, (el, index) => [index + 1, index >= 150])
-            .concat([231, 476, 913, 1431].map(seed => [seed, false]), [96, 103, 429, 3657, 3860, 4485].map(seed => [seed, true]));
+            .concat([231, 476, 913, 1431].map(seed => [seed, false]), [96, 103, 429, 2298, 3657, 3860].map(seed => [seed, true]));
         for (const [seed, errors] of seeds) {
             const result = await fuzzer.run(fuzz.generate('s' + seed, { errors: errors }));
             result.violations.filter(el => /^I/.test(el.invariant)).forEach(el => broken.push('seed ' + seed + ': ' + el.invariant + ' at ' + el.at + ' s: ' + el.text));
