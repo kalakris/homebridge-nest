@@ -320,7 +320,7 @@ function create(deps) {
 
         const world = env.world = {
             violations: [], lines: [], kept: [], requests: [], commits: [], steps: [], events: [],
-            open: 0, model: 0, restarts: 0, auths: 0, reauthenticated: 0, echoes: 0, rejected: 0, latest: {}, sent: {}, groups: {}, reported: {}, dropped: [], taken: [], answeredAt: 0
+            open: 0, model: 0, restarts: 0, auths: 0, reauthenticated: 0, echoes: 0, rejected: 0, latest: {}, sent: {}, groups: {}, reported: {}, dropped: [], taken: [], settles: 0
         };
         world.violation = (invariant, text) => {
             if (!world.violations.some(el => el.invariant == invariant)) {
@@ -410,6 +410,12 @@ function create(deps) {
         conn.observeStreamSeq = 1;
         // (An acknowledged ping on the open stream, every 60 s)
         setInterval(() => conn.noteContact(), 60000);
+
+        const settleMergeUpdates = conn.settleMergeUpdates.bind(conn);
+        conn.settleMergeUpdates = (...args) => {
+            world.settles++;
+            return settleMergeUpdates(...args);
+        };
 
         // ---- What the plugin is asked to do, and what it sends
         const settingKey = commit => commit.object + '/' + commit.key;
@@ -544,7 +550,7 @@ function create(deps) {
                 const whole = text.slice(from).startsWith(' - sending it again');
                 named(whole ? text.slice(0, text.search(/ \(status \d after /)) : text.slice(from, text.indexOf(' again', from))).forEach(({ commit }) => {
                     commit.resent = true;
-                    commit.resentAt = clock.now;
+                    commit.resentAt = world.settles;
                     // I14. After a status 7 a change is sent again only once a reauthentication has succeeded since.
                     if (/ \(status 7 after /.test(text) && commit.before7 !== undefined && world.reauthenticated <= commit.before7) {
                         world.violation('I14', 'change #' + commit.seq + ' (' + settingKey(commit) + ') is sent again after a status 7 without a reauthentication');
@@ -739,8 +745,9 @@ function create(deps) {
             for (const commit of request.carries) {
                 commit.flying--;
                 commit.last = answer.kind;
-                // (For I15: a resend answered as taken, no other request having been answered since it was decided)
-                if (commit.resentIn == request.number && ANSWERED.includes(answer.kind) && !LOST.includes(answer.kind) && world.answeredAt <= commit.resentAt) {
+                // (For I15: a resend answered as taken, nothing having been settled since it was decided but, then,
+                // the rest of its own push)
+                if (commit.resentIn == request.number && ANSWERED.includes(answer.kind) && !LOST.includes(answer.kind) && world.settles == commit.resentAt + 1) {
                     world.taken.push({ commit: commit, at: clock.now });
                 }
                 if (LOST.includes(answer.kind) && !off && options.status4Lost !== false) {
@@ -754,7 +761,6 @@ function create(deps) {
                 }
             }
             world.failed = world.failed || !ANSWERED.includes(answer.kind);
-            world.answeredAt = clock.now;
         };
 
         // ---- HomeKit
@@ -845,8 +851,8 @@ function create(deps) {
                 }
             }
             // I15. A change sent again was waiting to be pushed until its answer, and its 300 s echo wait counts from
-            // that answer. (Where no other request was answered since the status 4 or 7: any answered push settles
-            // every change made before it started.)
+            // that answer. (Where no other push has settled anything since the status 4 or 7: an answered push
+            // settles every change made before it started, also one that another push is about to send again.)
             for (const { commit, at } of world.taken.splice(0)) {
                 const update = conn.mergeUpdates.find(update => update.object.object_key == commit.object && exact(update.object.value[commit.key], commit.value));
                 if (update && typeof commit.value == 'number' && (!update.pushed || update.expiry_time != at + ECHO_MAX_MS)) {

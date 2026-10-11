@@ -1349,6 +1349,79 @@ const cases = {
         clearTimeout(conn.mergeEndTimer);
     },
 
+    // Found by the randomized test (6000 seeds). In a single mode the target temperature and a threshold were asked
+    // the same value in one push: each is its own change, given up as such, and neither stays held.
+    async 'heat mode, the target temperature and a threshold with the same value: both given up, nothing held'() {
+        const world = await makeWorld();
+        const conn = world.conn;
+        conn.currentState.shared[UP].target_temperature_type = 'heat';
+        conn.accessories[UP].device.target_temperature_type = 'heat';
+        conn.update('shared.' + UP, 'target_temperature', 23.5, 'heat', true);
+        conn.accessories[UP].device.target_temperature_high = 23.5;
+        conn.update('shared.' + UP, HIGH, 23.5, 'heat', true);
+        const push = conn.pushUpdates();
+        await world.sent(1);
+        world.answer(1, NOT_APPLIED, 15.6);
+        await world.sent(2);
+        assert.deepStrictEqual(held(conn), ['up {"target_temperature":23.5} waiting 120', 'up {"high":23.5} waiting 120']);
+        world.answer(2, NOT_APPLIED, 15.6);
+        await push;
+        await quiet();
+        assert.strictEqual(world.requests.length, 2);
+        assert.deepStrictEqual(held(conn), []);
+        assert.deepStrictEqual(world.said().filter(line => /^error /.test(line)), ['error Nest did not apply the change shared.' + UP + ' {"target_temperature":23.5,"target_temperature_high":23.5} (status 4 after 15.6 s) when it was sent again (attempt 2 of 2) - these changes were NOT applied: shared.' + UP + ' {"target_temperature":23.5,"target_temperature_high":23.5}']);
+        assert.strictEqual(timers(conn), 0);
+    },
+
+    // Found by the randomized test (6000 seeds, failing requests). A threshold goes out as the target temperature
+    // in a single mode, and a failed push is queued again that way. A newer threshold written into the queued change
+    // replaces it if it asks another value; if it asks the same value again, that value has been sent again
+    // already, and is not sent a fourth time.
+    async 'heat mode, a threshold sent again, failed and queued, and a newer one written into it'() {
+        for (const newer of [24.5, 24]) {
+            const world = await makeWorld();
+            const conn = world.conn;
+            let reauthenticated = null;
+            conn.auth = () => new Promise(resolve => {
+                reauthenticated = resolve;
+            });
+            conn.currentState.shared[UP].target_temperature_type = 'heat';
+            conn.accessories[UP].device.target_temperature_type = 'heat';
+            const threshold = value => {
+                conn.accessories[UP].device.target_temperature_high = value;
+                conn.update('shared.' + UP, HIGH, value, 'heat', true);
+            };
+            threshold(24);
+            const push = conn.pushUpdates();
+            await world.sent(1);
+            assert.deepStrictEqual(world.requests[0].carries, ['up HEAT 24/24']);
+            world.answer(1, NOT_APPLIED, 15.6);
+            await world.sent(2);
+            world.fail(2, 401, 1);
+            await until(() => reauthenticated, 'the reauthentication');
+            threshold(newer);
+            assert.deepStrictEqual(conn.pendingUpdates.map(el => el.object.value), [{ target_temperature: 24, [HIGH]: newer }]);
+            reauthenticated(true);
+            await world.sent(3);
+            world.lines.length = 0;
+            world.answer(3, NOT_APPLIED, 15.6);
+            if (newer != 24) {
+                await world.sent(4);
+                assert.deepStrictEqual(world.requests[3].carries, ['up HEAT 24.5/24.5'], 'the newer threshold, as the target temperature it is sent as');
+                assert.deepStrictEqual(world.said(), ['info Nest did not apply the change shared.' + UP + ' {"target_temperature":24,"target_temperature_high":24.5} (status 4 after 15.6 s) - sending shared.' + UP + ' {"target_temperature_high":24.5} again (the rest is not: replaced by a newer change, or lost) (attempt 2 of 2).']);
+                world.answer(4, landed([UP]), 3.3);
+            }
+            await push;
+            await quiet();
+            assert.strictEqual(world.requests.length, newer != 24 ? 4 : 3, 'newer ' + newer);
+            if (newer == 24) {
+                assert.deepStrictEqual(held(conn), []);
+                assert.ok(world.said().some(line => /^error .* when it was sent again \(attempt 2 of 2\) - these changes were NOT applied: shared\.AAAA000000000001 \{"target_temperature":24\}$/.test(line)), world.said().join('\n'));
+            }
+            clearTimeout(conn.mergeEndTimer);
+        }
+    },
+
     // Anything going wrong while it is decided what to send again: the answer is taken as before
     async 'deciding what to send again fails: one request, taken as a landed write'() {
         const world = await makeWorld();
