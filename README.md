@@ -68,11 +68,21 @@ Differences from upstream:
   REST API's devices alone.)
 * **Nest's answer to each change is logged.** Nest answers 2xx to changes it then does not apply (six of ~300
   setpoint writes in four days, each apparently answered only after 15-33 s), and the plugin did not look at the
-  answer. It still decides nothing from it (no real answer had been examined when this was written), but logs how
-  long the answer took, the HTTP status, the size of the body, the status codes and progress values found in it, and
-  its first 32 bytes in hex: at info level when it took 10 s or more, carried a status other than 0, could not be
-  read, or is of a kind not seen since the plugin started; otherwise only with `"Debug.Verbose"`. Look for
-  `Nest answered the change`.
+  answer. With one exception (the next item) it decides nothing from it, but logs how long the answer took, the HTTP
+  status, the size of the body, the status codes and progress values found in it, and its first 32 bytes in hex: at
+  info level when it took 10 s or more, carried a status other than 0, could not be read, or is of a kind not seen
+  since the plugin started; otherwise only with `"Debug.Verbose"`. Look for `Nest answered the change`.
+* **A change Nest answers as not applied is sent again, once.** The first lost write whose answer was logged
+  (2026-10-11) was answered after 15.6 s with HTTP 200 and four bytes, a status with code 4 and nothing else, and
+  never reached the thermostat. Before 4.6.10-ha.8 that counted as success: the written value stayed in HomeKit for
+  300 s, until a fresh read showed Nest's. Now a change answered with exactly those bytes is sent again at once,
+  built afresh from the current state, and HomeKit keeps the written value meanwhile. Never a value a newer change
+  to the same setting has replaced: then the newer one is what goes out, or has gone out. If Nest answers the same
+  again, the change is dropped, HomeKit shows Nest's state at once and the log says `these changes were NOT
+  applied`, as for a push that failed. Any other answer (another status, a status with a message, results per
+  change, anything unreadable) is taken as before. Look for `Nest did not apply the change` and `Sent again`.
+  To switch it off without a restart, create a file `nest-no-resend.on` in the Homebridge storage directory
+  (looked for at each such answer): the answer is then taken as before, and one line says so.
 * Errors are logged without the request headers (upstream could print Google cookies into the log).
 * **Raw observe-stream debug log (read-only).** While a file `nest-raw-debug.on` exists in the Homebridge storage
   directory (checked every 30 s, no restart needed), every observe stream frame and every trait of each Nest

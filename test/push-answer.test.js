@@ -2,8 +2,13 @@
 
 // Nest's answer to a pushed change is logged and nothing else: whatever the answer body holds, and whatever goes
 // wrong describing it, the push is treated exactly as it was before the answer was looked at.
+// One answer is acted on since 4.6.10-ha.8, a bare status 4 (test/push-resend.test.js). Here it is given with that
+// switched off (nest-no-resend.on in the storage directory): logged, and the push treated as before.
 
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const axios = require('axios');
 // index.js installs Promise.delay, which pushUpdates uses
 require('../index.js');
@@ -47,6 +52,8 @@ module.exports = async function() {
     const realAdapter = axios.defaults.adapter, realNow = Date.now;
     let now = realNow();
     Date.now = () => now;
+    const noResend = fs.mkdtempSync(path.join(os.tmpdir(), 'nest-no-resend-'));
+    fs.writeFileSync(path.join(noResend, 'nest-no-resend.on'), '');
     try {
         // One write of both setpoints, pushed and answered with `answer` after `seconds`. Returns everything the push
         // leaves behind and what was logged.
@@ -97,6 +104,16 @@ module.exports = async function() {
             other: []
         };
         const CHANGE = 'Nest answered the change shared.T1 {"target_temperature_low":21,"target_temperature_high":23} after ';
+        // A push answered with a bare status 4, with sending it again switched off: one more line says so
+        const pushNoResend = async (answer, seconds) => {
+            conn.storagePath = noResend;
+            try {
+                return await push(answer, seconds);
+            } finally {
+                conn.storagePath = null;
+            }
+        };
+        const notSentAgain = seconds => 'info Nest did not apply the change shared.T1 {"target_temperature_low":21,"target_temperature_high":23} (status 4 after ' + seconds + ' s) - not sending it again: nest-no-resend.on exists in ' + noResend + '.';
 
         // An empty answer at normal speed. The first of its kind since the start is logged, as a sample; after that
         // only with Debug.Verbose
@@ -144,8 +161,8 @@ module.exports = async function() {
             run = await push({ data: operation(2, varint(1, 13)) }, 2);
             assert.deepStrictEqual(run.left, expected);
             assert.deepStrictEqual(run.answered, ['info ' + CHANGE + '2 s: HTTP 200, 21 byte(s), operation (progress 2, status 13), starts 0a130a0b0a094445564943455f543110021a02080d.']);
-            run = await push({ data: bytes(2, varint(1, 4)) }, 17);
-            assert.deepStrictEqual(run.left, expected);
+            run = await pushNoResend({ data: bytes(2, varint(1, 4)) }, 17);
+            assert.deepStrictEqual(run.left, Object.assign({}, expected, { other: [notSentAgain(17)] }));
             assert.deepStrictEqual(run.answered, ['info ' + CHANGE + '17 s (slow): HTTP 200, 4 byte(s), status 4, starts 12020804.']);
             run = await push({ data: conn.StreamBody.encode(conn.StreamBody.fromObject({ status: { code: 7, message: 'authentication failed' } })).finish() }, 2);
             assert.deepStrictEqual(run.left, expected);
@@ -180,7 +197,8 @@ module.exports = async function() {
             assert.deepStrictEqual(run.left, expected);
             assert.deepStrictEqual(run.answered, [], 'empty, as seen before');
         }
-        run = await push({ data: new Uint8Array([0x12, 0x02, 0x08, 0x04]) }, 2);
+        run = await pushNoResend({ data: new Uint8Array([0x12, 0x02, 0x08, 0x04]) }, 2);
+        assert.deepStrictEqual(run.left, Object.assign({}, expected, { other: [notSentAgain(2)] }));
         assert.ok(/4 byte\(s\), status 4, starts 12020804\.$/.test(run.answered[0]), run.answered[0]);
         for (const data of [{ some: 'object' }, 42, true, () => {}]) {
             run = await push({ data: data }, 2);
@@ -292,5 +310,6 @@ module.exports = async function() {
     } finally {
         axios.defaults.adapter = realAdapter;
         Date.now = realNow;
+        fs.rmSync(noResend, { recursive: true, force: true });
     }
 };
