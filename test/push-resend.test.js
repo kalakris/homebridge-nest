@@ -335,7 +335,7 @@ const cases = {
         // HomeKit is shown, the newer one.
         assert.deepStrictEqual(world.requests[2].carries, ['up RANGE 21.1/22.2']);
         assert.deepStrictEqual(held(conn), ['up {"low":21.1} waiting 120', 'up {"high":22.2} pushed 292.4']);
-        assert.deepStrictEqual(world.said(), ['info Nest did not apply the change shared.' + UP + ' {"target_temperature_low":21.1,"target_temperature_high":22.8} (status 4 after 15.6 s) - sending shared.' + UP + ' {"target_temperature_low":21.1} again, the rest has been replaced by a newer change or is no longer held (attempt 2 of 2).']);
+        assert.deepStrictEqual(world.said(), ['info Nest did not apply the change shared.' + UP + ' {"target_temperature_low":21.1,"target_temperature_high":22.8} (status 4 after 15.6 s) - sending shared.' + UP + ' {"target_temperature_low":21.1} again (the rest is not: replaced by a newer change, or lost) (attempt 2 of 2).']);
         world.answer(3, landed([UP]), 3);
         await push;
         assert.deepStrictEqual(held(conn), ['up {"low":21.1} pushed 300', 'up {"high":22.2} pushed 289.4']);
@@ -365,7 +365,7 @@ const cases = {
         await push;
         await quiet();
         assert.strictEqual(world.requests.length, 2, 'the older pair is not sent again');
-        assert.deepStrictEqual(world.said(), ['info Nest did not apply the change shared.' + UP + ' {"target_temperature_low":21.1,"target_temperature_high":22.8} (status 4 after 15.6 s) - not sending it again: a newer change has replaced it, or it is no longer held.']);
+        assert.deepStrictEqual(world.said(), ['info Nest did not apply the change shared.' + UP + ' {"target_temperature_low":21.1,"target_temperature_high":22.8} (status 4 after 15.6 s) - not sending it again: a newer change has replaced it.']);
         assert.deepStrictEqual(held(conn), []);
         assert.deepStrictEqual(showing(conn).up, '20.6/22.2 range');
         assert.strictEqual(timers(conn), 0);
@@ -385,7 +385,7 @@ const cases = {
         assert.deepStrictEqual(world.requests[1].carries, ['up RANGE 21.1/22.2']);
         assert.deepStrictEqual(conn.pendingUpdates, [], 'the queue went out with it');
         assert.deepStrictEqual(held(conn), ['up {"low":21.1} waiting 120', 'up {"high":22.2} waiting 118.4'], 'the older high setpoint is no longer held');
-        assert.deepStrictEqual(world.said(), ['info Nest did not apply the change shared.' + UP + ' {"target_temperature_low":21.1,"target_temperature_high":22.8} (status 4 after 15.6 s) - sending shared.' + UP + ' {"target_temperature_low":21.1} again, the rest has been replaced by a newer change or is no longer held (attempt 2 of 2).']);
+        assert.deepStrictEqual(world.said(), ['info Nest did not apply the change shared.' + UP + ' {"target_temperature_low":21.1,"target_temperature_high":22.8} (status 4 after 15.6 s) - sending shared.' + UP + ' {"target_temperature_low":21.1} again (the rest is not: replaced by a newer change, or lost) (attempt 2 of 2).']);
         world.answer(2, landed([UP]), 3);
         await push;
         assert.deepStrictEqual(held(conn), ['up {"low":21.1} pushed 300', 'up {"high":22.2} pushed 300']);
@@ -437,11 +437,182 @@ const cases = {
         // As before: a failed push drops every change made before it started, so HomeKit shows Nest's state
         assert.deepStrictEqual(held(conn), []);
         assert.deepStrictEqual(showing(conn).up, '20/22.2 range');
+        world.lines.length = 0;
         world.answer(1, NOT_APPLIED, 15.6);
         await push;
         await quiet();
         assert.strictEqual(world.requests.length, 2, 'nothing held, nothing sent again');
+        // The high setpoint was replaced by the newer change (lost with its own line); the low one is said to be lost
+        assert.deepStrictEqual(world.said(), ['error Nest did not apply the change shared.' + UP + ' {"target_temperature_low":21.1,"target_temperature_high":22.8} (status 4 after 15.6 s), and it was no longer held (Nest reported another value, or another push that failed dropped it), so it is not sent again - these changes were NOT applied: shared.' + UP + ' {"target_temperature_low":21.1}']);
         assert.strictEqual(timers(conn), 0);
+    },
+
+    // Found by the randomized test (write-fuzz.js). The newer change was sent, answered status 4 twice and dropped
+    // while the older push was still unanswered: the older value is not sent after it.
+    async 'a newer change that was itself given up meanwhile: the older one is not sent again'() {
+        for (const settledMeanwhile of [false, true]) {
+            const world = await makeWorld();
+            const conn = world.conn;
+            writePair(conn, DN, 19.4, 22.8);
+            const push = conn.pushUpdates();
+            await world.sent(1);
+            env.now += 1000;
+            if (settledMeanwhile) {
+                // A push for the other thermostat is answered: that marks the pair pushed (every push settles all
+                // changes made before it started), so that it outlives the newer pair being given up
+                set(conn, UP, HIGH, 23.3);
+                conn.pushUpdates();
+                await world.sent(2);
+                world.answer(2, landed([UP]), 1);
+                await quiet();
+            }
+            const first = world.requests.length;
+            env.now += 2000;
+            writePair(conn, DN, 20, 23.3);
+            const newer = conn.pushUpdates();
+            await world.sent(first + 1);
+            world.answer(first + 1, NOT_APPLIED, 1);
+            await world.sent(first + 2);
+            world.answer(first + 2, NOT_APPLIED, 1);
+            await newer;
+            // The newer pair is given up, and with it what no push had settled of the older one
+            assert.deepStrictEqual(held(conn).filter(line => /^dn/.test(line)).map(line => line.replace(/ [\d.]+$/, '')), settledMeanwhile ? ['dn {"low":19.4} pushed', 'dn {"high":22.8} pushed'] : []);
+            assert.deepStrictEqual(showing(conn).dn, settledMeanwhile ? '19.4/22.8 range' : '18.9/21.1 range');
+            world.lines.length = 0;
+            world.shown.length = 0;
+            world.answer(1, NOT_APPLIED, 15.6);
+            await push;
+            await quiet();
+            assert.strictEqual(world.requests.length, first + 2, '19.4/22.8 is not sent after 20/23.3 was');
+            assert.deepStrictEqual(world.requests.filter(request => /^dn/.test(request.carries[0])).map(request => request.carries[0]), ['dn RANGE 19.4/22.8', 'dn RANGE 20/23.3', 'dn RANGE 20/23.3']);
+            assert.deepStrictEqual(held(conn).filter(line => /^dn/.test(line)), []);
+            assert.deepStrictEqual(showing(conn).dn, '18.9/21.1 range');
+            // Where the older pair was still held, HomeKit is told Nest's state at once
+            assert.deepStrictEqual(world.shown.map(shown => shown.dn), settledMeanwhile ? ['18.9/21.1 range'] : []);
+            assert.deepStrictEqual(conn.accessories[DN].device.target_temperature_low, 18.9);
+            assert.deepStrictEqual(world.said(), ['info Nest did not apply the change shared.' + DN + ' {"target_temperature_low":19.4,"target_temperature_high":22.8} (status 4 after 15.6 s) - not sending it again: a newer change has replaced it.']);
+            clearTimeout(conn.mergeEndTimer);
+        }
+    },
+
+    // Found by the randomized test. The change went out in another request too (a mode change carries the
+    // setpoints), Nest reported it and released it. Its own request is answered status 4: Nest's last report may be
+    // older than what Nest holds, so it is sent again all the same.
+    async 'no longer held, and Nest last reported this very value: sent again all the same'() {
+        const world = await makeWorld();
+        const conn = world.conn;
+        set(conn, UP, LOW, 21.1); // queued
+        setMode(conn, UP, 'heat');
+        await world.sent(2);
+        assert.deepStrictEqual(world.requests[1].carries, ['up HEAT 21.1/22.2']);
+        world.answer(1, Buffer.alloc(0), 1);
+        world.answer(2, landed([UP]), 1);
+        await quiet();
+        env.now += 2000;
+        conn.currentState.shared[UP].target_temperature_type = 'heat';
+        frame(conn, UP, 21.1, 22.2);
+        assert.deepStrictEqual(held(conn).filter(line => /^up/.test(line)), []);
+        env.now += 5000;
+        const push = conn.pushUpdates();
+        await world.sent(3);
+        world.lines.length = 0;
+        world.answer(3, NOT_APPLIED, 15.6);
+        await world.sent(4);
+        assert.deepStrictEqual(world.requests[3].carries, ['up HEAT 21.1/22.2']);
+        world.answer(4, NOT_APPLIED, 15.6);
+        await push;
+        await quiet();
+        assert.strictEqual(world.requests.length, 4);
+        assert.deepStrictEqual(world.said(), [
+            'info Nest did not apply the change shared.' + UP + ' {"target_temperature_low":21.1} (status 4 after 15.6 s) - sending it again (attempt 2 of 2).',
+            'error Nest did not apply the change shared.' + UP + ' {"target_temperature_low":21.1} (status 4 after 15.6 s) when it was sent again (attempt 2 of 2) - these changes were NOT applied: shared.' + UP + ' {"target_temperature_low":21.1}'
+        ]);
+        clearTimeout(conn.mergeEndTimer);
+    },
+
+    // The count of times sent again stays with the change: sent again, answered 401 and queued for a retry, it goes
+    // out with another push before that retry does, and a second status 4 ends it there
+    async 'sent again, failed, queued again and taken by another push: still sent again only once'() {
+        const world = await makeWorld();
+        const conn = world.conn;
+        let reauthenticated = null;
+        conn.auth = () => new Promise(resolve => {
+            reauthenticated = resolve;
+        });
+        writePair(conn, DN, 18.9, 22.8);
+        const push = conn.pushUpdates();
+        await world.sent(1);
+        world.answer(1, NOT_APPLIED, 15.6);
+        await world.sent(2);
+        world.fail(2, 401, 1);
+        await until(() => reauthenticated, 'the reauthentication');
+        assert.strictEqual(conn.pendingUpdates.length, 1, 'queued for the retry');
+        set(conn, UP, HIGH, 23.3);
+        const other = conn.pushUpdates(); // (the debounced push of that write)
+        await world.sent(3);
+        assert.deepStrictEqual(world.requests[2].carries, ['up RANGE 20/23.3', 'dn RANGE 18.9/22.8']);
+        world.answer(3, NOT_APPLIED, 15.6);
+        await other;
+        reauthenticated(true);
+        await push;
+        await quiet();
+        assert.strictEqual(world.requests.length, 3, 'not sent a fourth time');
+        assert.deepStrictEqual(held(conn), []);
+        assert.ok(world.said().some(line => /^error .*\(attempt 2 of 2\) - these changes were NOT applied: /.test(line)), world.said().join('\n'));
+        assert.strictEqual(timers(conn), 0);
+    },
+
+    // Found by the randomized test. A setpoint written just after an eco or mode change is marked pushed when that
+    // change's own request is answered, before the setpoint's push has started: it is sent again all the same.
+    async 'a setpoint written with a mode change, marked pushed by the mode change\'s answer: sent again'() {
+        const world = await makeWorld();
+        const conn = world.conn;
+        setMode(conn, UP, 'heat');
+        set(conn, UP, HIGH, 23.3); // queued; the mode change went out at once, in two requests
+        await world.sent(2);
+        world.answer(1, Buffer.alloc(0), 1);
+        world.answer(2, landed([UP]), 1);
+        await quiet();
+        assert.deepStrictEqual(held(conn).filter(line => /high/.test(line)), ['up {"high":23.3} pushed 300'], 'pushed, though no request has carried it');
+        env.now += 6000;
+        const push = conn.pushUpdates();
+        await world.sent(3);
+        world.answer(3, NOT_APPLIED, 15.6);
+        await world.sent(4);
+        assert.deepStrictEqual(world.requests[3].carries, world.requests[2].carries);
+        assert.deepStrictEqual(held(conn).filter(line => /high/.test(line)), ['up {"high":23.3} waiting 120']);
+        world.answer(4, NOT_APPLIED, 15.6);
+        await push;
+        assert.deepStrictEqual(held(conn).filter(line => /high/.test(line)), [], 'given up: dropped');
+        assert.ok(/^error .* - these changes were NOT applied: shared\.AAAA000000000001 \{"target_temperature_high":23\.3\}$/.test(world.said()[world.said().length - 1]), world.said().join('\n'));
+        clearTimeout(conn.mergeEndTimer);
+    },
+
+    // Found by the randomized test. Someone else changes the setpoint while the push is unanswered, and another
+    // push's answer has marked the change pushed: Nest's value is shown (as before), and the change is said to be lost.
+    async 'released by a change made at Nest meanwhile: not sent again, and said to be lost'() {
+        const world = await makeWorld();
+        const conn = world.conn;
+        set(conn, DN, HIGH, 22.8);
+        const push = conn.pushUpdates();
+        await world.sent(1);
+        env.now += 3000;
+        set(conn, UP, HIGH, 23.3);
+        const other = conn.pushUpdates();
+        await world.sent(2);
+        world.answer(2, landed([UP]), 1);
+        await other;
+        env.now += 2000;
+        frame(conn, DN, 18.9, 20); // not ours, and not what Nest had
+        assert.deepStrictEqual(showing(conn).dn, '18.9/20 range');
+        world.lines.length = 0;
+        world.answer(1, NOT_APPLIED, 15.6);
+        await push;
+        await quiet();
+        assert.strictEqual(world.requests.length, 2);
+        assert.deepStrictEqual(world.said(), ['error Nest did not apply the change shared.' + DN + ' {"target_temperature_high":22.8} (status 4 after 15.6 s), and it was no longer held (Nest reported another value, or another push that failed dropped it), so it is not sent again - these changes were NOT applied: shared.' + DN + ' {"target_temperature_high":22.8}']);
+        assert.deepStrictEqual(showing(conn).dn, '18.9/20 range');
+        clearTimeout(conn.mergeEndTimer);
     },
 
     // One push for both thermostats, as on 2026-10-11 00:10:06Z. A bare status 4 is the answer to the whole request.
@@ -559,7 +730,7 @@ const cases = {
             assert.strictEqual(world.requests.length, 4, 'heat is not sent again');
             assert.deepStrictEqual(showing(conn).up, '20/22.2 cool');
             assert.deepStrictEqual(held(conn).filter(line => /type/.test(line)).map(line => line.replace(/ (pushed|waiting) .*/, '')), ['up {"target_change_pending":true,"type":"cool"}']);
-            assert.ok(/ - not sending it again: a newer change has replaced it, or it is no longer held\.$/.test(world.said()[0]), world.said()[0]);
+            assert.ok(/ - not sending it again: a newer change has replaced it\.$/.test(world.said()[0]), world.said()[0]);
             if (!answeredFirst) {
                 world.answer(3, Buffer.alloc(0), 12);
                 world.answer(4, landed([UP]), 12);

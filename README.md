@@ -76,11 +76,14 @@ Differences from upstream:
   (2026-10-11) was answered after 15.6 s with HTTP 200 and four bytes, a status with code 4 and nothing else, and
   never reached the thermostat. Before 4.6.10-ha.8 that counted as success: the written value stayed in HomeKit for
   300 s, until a fresh read showed Nest's. Now a change answered with exactly those bytes is sent again at once,
-  built afresh from the current state, and HomeKit keeps the written value meanwhile. Never a value a newer change
-  to the same setting has replaced: then the newer one is what goes out, or has gone out. If Nest answers the same
-  again, the change is dropped, HomeKit shows Nest's state at once and the log says `these changes were NOT
-  applied`, as for a push that failed. Any other answer (another status, a status with a message, results per
-  change, anything unreadable) is taken as before. Look for `Nest did not apply the change` and `Sent again`.
+  built afresh from the current state, and HomeKit keeps the written value meanwhile. Never a value that is not the
+  last one asked for: once a newer change to the same setting has been made, whatever became of it, the older value
+  is neither sent again nor shown any longer. If Nest answers the same again, the change is dropped, HomeKit shows
+  Nest's state at once and the log says `these changes were NOT applied`, as for a push that failed. The same line
+  is logged, and nothing sent, for a change that is no longer held when the answer comes because Nest has reported
+  another value for the setting meanwhile (someone else changed it). Any other answer (another status, a status
+  with a message, results per change, anything unreadable) is taken as before. Look for `Nest did not apply the
+  change` and `Sent again`.
   To switch it off without a restart, create a file `nest-no-resend.on` in the Homebridge storage directory
   (looked for at each such answer): the answer is then taken as before, and one line says so.
 * Errors are logged without the request headers (upstream could print Google cookies into the log).
