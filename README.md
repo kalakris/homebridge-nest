@@ -72,19 +72,26 @@ Differences from upstream:
   status, the size of the body, the status codes and progress values found in it, and its first 32 bytes in hex: at
   info level when it took 10 s or more, carried a status other than 0, could not be read, or is of a kind not seen
   since the plugin started; otherwise only with `"Debug.Verbose"`. Look for `Nest answered the change`.
-* **A change Nest answers as not applied is sent again, once.** The first lost write whose answer was logged
-  (2026-10-11) was answered after 15.6 s with HTTP 200 and four bytes, a status with code 4 and nothing else, and
-  never reached the thermostat. Before 4.6.10-ha.8 that counted as success: the written value stayed in HomeKit for
-  300 s, until a fresh read showed Nest's. Now a change answered with exactly those bytes is sent again at once,
-  built afresh from the current state, and HomeKit keeps the written value meanwhile. Never a value that is not the
-  last one asked for: once a newer change to the same setting has been made, whatever became of it, the older value
-  is neither sent again nor shown any longer. If Nest answers the same again, the change is dropped, HomeKit shows
-  Nest's state at once and the log says `these changes were NOT applied`, as for a push that failed. The same line
-  is logged, and nothing sent, for a change that is no longer held when the answer comes because Nest has reported
-  another value for the setting meanwhile (someone else changed it). Any other answer (another status, a status
-  with a message, results per change, anything unreadable) is taken as before. Look for `Nest did not apply the
-  change` and `Sent again`.
-  To switch it off without a restart, create a file `nest-no-resend.on` in the Homebridge storage directory
+* **A change Nest answers as not applied is sent again, once.** The first two lost writes whose answers were logged
+  (2026-10-11) were both answered with HTTP 200 and a body that is nothing but a status: after 15.6 s with a status
+  4 (four bytes, no text), and after 20.4 s with a status 7 and the text "authentication failed" (27 bytes; nothing
+  else had failed, and the same session carried the same write 6 minutes later). Neither reached the thermostat.
+  Before 4.6.10-ha.8 that counted as success: the written value stayed in HomeKit for 300 s, until a fresh read
+  showed Nest's. Now a change answered with nothing but a status 4 or a status 7 (with or without a text: so a
+  status 4 with a text counts too, though none has been seen) is sent again, built afresh from the current state,
+  and HomeKit keeps the written value meanwhile. After a status 4 at once; after a status 7 once the plugin has
+  reauthenticated (without letting go of its session meanwhile, as it does ahead of a token's end; if that fails or
+  takes more than 40 s the change is not sent again, and is dropped and logged as below). Each change is sent again
+  once, whichever of the two answers come. Never a value that is not the last one asked for: once a newer change to
+  the same setting has been made, whatever became of it, the older value is neither sent again nor shown any
+  longer. If Nest answers a status 4 or 7 again, the change is dropped, HomeKit shows Nest's state at once and the
+  log says `these changes were NOT applied`, as for a push that failed. The same line is logged, and nothing sent,
+  for a change that is no longer held when the answer comes because Nest has reported another value for the setting
+  meanwhile (someone else changed it). Any other answer (another status; a status 4 or 7 with anything more than
+  its code and a text, or longer than 129 bytes; results per change; anything unreadable) is taken as before. Every
+  line names the status: look for `Nest did not apply the change`, `(status 4 after`, `(status 7 after` and
+  `Sent again`.
+  To switch all of it off without a restart, create a file `nest-no-resend.on` in the Homebridge storage directory
   (looked for at each such answer): the answer is then taken as before, and one line says so.
 * Errors are logged without the request headers (upstream could print Google cookies into the log).
 * **Raw observe-stream debug log (read-only).** While a file `nest-raw-debug.on` exists in the Homebridge storage

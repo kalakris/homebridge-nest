@@ -2,8 +2,9 @@
 
 // Nest's answer to a pushed change is logged and nothing else: whatever the answer body holds, and whatever goes
 // wrong describing it, the push is treated exactly as it was before the answer was looked at.
-// One answer is acted on since 4.6.10-ha.8, a bare status 4 (test/push-resend.test.js). Here it is given with that
-// switched off (nest-no-resend.on in the storage directory): logged, and the push treated as before.
+// Two answers are acted on since 4.6.10-ha.8, a bare status 4 and a bare status 7 (test/push-resend.test.js). Here
+// they are given with that switched off (nest-no-resend.on in the storage directory): logged, and the push treated
+// as before.
 
 const assert = require('assert');
 const fs = require('fs');
@@ -104,7 +105,7 @@ module.exports = async function() {
             other: []
         };
         const CHANGE = 'Nest answered the change shared.T1 {"target_temperature_low":21,"target_temperature_high":23} after ';
-        // A push answered with a bare status 4, with sending it again switched off: one more line says so
+        // A push answered with a bare status 4 or 7, with sending it again switched off: one more line says so
         const pushNoResend = async (answer, seconds) => {
             conn.storagePath = noResend;
             try {
@@ -113,7 +114,7 @@ module.exports = async function() {
                 conn.storagePath = null;
             }
         };
-        const notSentAgain = seconds => 'info Nest did not apply the change shared.T1 {"target_temperature_low":21,"target_temperature_high":23} (status 4 after ' + seconds + ' s) - not sending it again: nest-no-resend.on exists in ' + noResend + '.';
+        const notSentAgain = (seconds, status) => 'info Nest did not apply the change shared.T1 {"target_temperature_low":21,"target_temperature_high":23} (status ' + (status || 4) + ' after ' + seconds + ' s) - not sending it again: nest-no-resend.on exists in ' + noResend + '.';
 
         // An empty answer at normal speed. The first of its kind since the start is logged, as a sample; after that
         // only with Debug.Verbose
@@ -164,8 +165,8 @@ module.exports = async function() {
             run = await pushNoResend({ data: bytes(2, varint(1, 4)) }, 17);
             assert.deepStrictEqual(run.left, Object.assign({}, expected, { other: [notSentAgain(17)] }));
             assert.deepStrictEqual(run.answered, ['info ' + CHANGE + '17 s (slow): HTTP 200, 4 byte(s), status 4, starts 12020804.']);
-            run = await push({ data: conn.StreamBody.encode(conn.StreamBody.fromObject({ status: { code: 7, message: 'authentication failed' } })).finish() }, 2);
-            assert.deepStrictEqual(run.left, expected);
+            run = await pushNoResend({ data: conn.StreamBody.encode(conn.StreamBody.fromObject({ status: { code: 7, message: 'authentication failed' } })).finish() }, 2);
+            assert.deepStrictEqual(run.left, Object.assign({}, expected, { other: [notSentAgain(2, 7)] }));
             assert.strictEqual(run.answered.length, 1);
             assert.ok(/ 27 byte\(s\), status 7, starts 12190807/.test(run.answered[0]), run.answered[0]);
             assert.ok(!/authentication failed/.test(run.answered[0]), 'only codes, sizes and the first bytes are logged');
