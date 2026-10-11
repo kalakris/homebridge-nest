@@ -1323,6 +1323,34 @@ const cases = {
         clearTimeout(conn.mergeEndTimer);
     },
 
+    // ... unless it asked the very value that is now given up: then nothing goes on showing that value. (Found by
+    // the randomized test, 6000 seeds with failing requests: an older change with the same value, queued again by
+    // the retry of a failed push and marked pushed by another push's answer, stayed shown for up to 300 s after the
+    // line that said the value was NOT applied.)
+    async 'given up: an earlier change that asked the same value is let go with it'() {
+        const world = await makeWorld();
+        const conn = world.conn;
+        set(conn, DN, HIGH, 22.8);
+        const earlier = conn.pushUpdates();
+        await world.sent(1);
+        world.answer(1, Buffer.from('1202080d', 'hex'), 3); // (taken as success, whatever Nest did with it)
+        await earlier;
+        assert.deepStrictEqual(held(conn), ['dn {"high":22.8} pushed 300']);
+        env.now += 60000;
+        set(conn, DN, HIGH, 22.8);
+        const push = conn.pushUpdates();
+        await world.sent(2);
+        world.answer(2, NOT_APPLIED, 15.6);
+        await world.sent(3);
+        world.answer(3, NOT_APPLIED, 15.6);
+        await push;
+        await quiet();
+        assert.deepStrictEqual(held(conn), []);
+        assert.deepStrictEqual(showing(conn).dn, '18.9/21.1 range');
+        assert.deepStrictEqual(world.shown[world.shown.length - 1].dn, '18.9/21.1 range');
+        assert.strictEqual(timers(conn), 0);
+    },
+
     // In a single mode a threshold written by HomeKit goes out as the target temperature (pushUpdates, the Siri
     // workaround), under another key than the change was made with: sent again the same way
     async 'heat mode, the heating threshold written: sent again as it was sent'() {
