@@ -594,6 +594,46 @@ const cases = {
         clearTimeout(conn.mergeEndTimer);
     },
 
+    // The count is each setting's own. A newer value written into a change that waits, queued, for the retry of its
+    // failed resend has not been sent again: it gets its two attempts, while the setting beside it is given up.
+    async 'a newer value written into a change queued for its retry starts its own count'() {
+        const world = await makeWorld();
+        const conn = world.conn;
+        let reauthenticated = null;
+        conn.auth = () => new Promise(resolve => {
+            reauthenticated = resolve;
+        });
+        writePair(conn, DN, 19.4, 22.8);
+        const push = conn.pushUpdates();
+        await world.sent(1);
+        world.answer(1, NOT_APPLIED, 15.6);
+        await world.sent(2);
+        world.fail(2, 401, 1);
+        await until(() => reauthenticated, 'the reauthentication');
+        set(conn, DN, HIGH, 23.3); // written into the queued change
+        assert.deepStrictEqual(conn.pendingUpdates.map(el => [el.object.value, el.resends]), [[{ [LOW]: 19.4, [HIGH]: 23.3 }, { [LOW]: 1 }]]);
+        reauthenticated(true);
+        await world.sent(3);
+        assert.deepStrictEqual(world.requests[2].carries, ['dn RANGE 19.4/23.3']);
+        world.lines.length = 0;
+        world.answer(3, NOT_APPLIED, 15.6);
+        await world.sent(4);
+        // The low setpoint has been sent again once: given up, and HomeKit shows Nest's. The high one has not.
+        assert.deepStrictEqual(world.requests[3].carries, ['dn RANGE 18.9/23.3']);
+        // (with the newer high setpoint waits the one before it, which no push has settled)
+        assert.deepStrictEqual(held(conn), ['dn {"high":22.8} waiting 120', 'dn {"high":23.3} waiting 120']);
+        assert.deepStrictEqual(world.said(), [
+            'error Nest did not apply the change shared.' + DN + ' {"target_temperature_low":19.4,"target_temperature_high":23.3} (status 4 after 15.6 s) when it was sent again (attempt 2 of 2) - these changes were NOT applied: shared.' + DN + ' {"target_temperature_low":19.4}',
+            'info Nest did not apply the change shared.' + DN + ' {"target_temperature_low":19.4,"target_temperature_high":23.3} (status 4 after 15.6 s) - sending shared.' + DN + ' {"target_temperature_high":23.3} again (the rest is not: replaced by a newer change, or lost) (attempt 2 of 2).'
+        ]);
+        world.answer(4, landed([DN]), 3.3);
+        await push;
+        await quiet();
+        assert.strictEqual(world.requests.length, 4);
+        assert.deepStrictEqual(held(conn), ['dn {"high":23.3} pushed 300']);
+        clearTimeout(conn.mergeEndTimer);
+    },
+
     // Found by the randomized test. A setpoint written just after an eco or mode change is marked pushed when that
     // change's own request is answered, before the setpoint's push has started: it is sent again all the same.
     async 'a setpoint written with a mode change, marked pushed by the mode change\'s answer: sent again'() {
@@ -1053,7 +1093,7 @@ const cases = {
         assert.deepStrictEqual(held(conn), ['up {"low":21.1} pushed 300']);
         assert.deepStrictEqual(world.said(), [
             'info Nest did not apply the change shared.' + UP + ' {"target_temperature_low":21.1} (status 4 after 15.6 s) - sending it again (attempt 2 of 2).',
-            'info Sent again, the change shared.' + UP + ' {"target_temperature":21.1} was answered after 3 s without status 4 (attempt 2 of 2).'
+            'info Sent again, the change shared.' + UP + ' {"target_temperature_low":21.1} was answered after 3 s without status 4 (attempt 2 of 2).'
         ]);
         clearTimeout(conn.mergeEndTimer);
     },

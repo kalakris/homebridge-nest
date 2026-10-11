@@ -405,11 +405,24 @@ function create(deps) {
         let pushing = null;
         const pushUpdates = conn.pushUpdates.bind(conn);
         conn.pushUpdates = (...args) => {
+            // (Where two queued changes write the same setting, a failed push queued again in front of a newer one,
+            // the request carries the first one's value: the plugin builds a request from the queue's end backwards,
+            // each change writing over the ones after it. I13 checks this against the bytes.)
             const entries = {};
-            copy(args[0] || conn.pendingUpdates).forEach(el => {
+            copy(args[0] || conn.pendingUpdates).forEach((el, index) => {
                 for (const key in el.object.value) {
-                    if (key != 'target_change_pending') {
-                        entries[el.object.object_key + '/' + key] = { object: el.object.object_key, key: key, value: el.object.value[key] };
+                    const first = entries[el.object.object_key + '/' + key];
+                    if (key != 'target_change_pending' && !first) {
+                        entries[el.object.object_key + '/' + key] = { object: el.object.object_key, key: key, value: el.object.value[key], mode: el.hvac_mode };
+                    } else if (first && same(first.value, el.object.value[key])) {
+                        // (The same value, to what Nest can tell, asked for again: this change goes out as well)
+                        entries[el.object.object_key + '/' + key + '/' + index] = { object: el.object.object_key, key: key, value: el.object.value[key], mode: el.hvac_mode };
+                    } else if (first) {
+                        // (For P3: a queued change whose value does not go out, written over by one queued before it)
+                        const commit = commitOf({ object: el.object.object_key, key: key, value: el.object.value[key] }, world.commits.length);
+                        if (commit) {
+                            commit.overridden = true;
+                        }
                     }
                 }
             });
@@ -470,13 +483,19 @@ function create(deps) {
         // An error line that says changes were NOT applied: which ones
         const lost = text => {
             const from = text.indexOf('NOT applied');
+            const givenUp = /when it was sent again/.test(text);
             named(from < 0 ? '' : text.slice(from)).forEach(({ commit, key }) => {
                 commit.dropped = true;
-                // (For I10. Not where the line names a threshold as the target temperature it was sent as: in a
-                // single mode a threshold stays held until Nest's state is read, 300 s later, whatever became of it)
-                if (commit.key == key) {
-                    world.dropped.push({ commit: commit, resend: /^Nest did not apply the change/.test(text) });
+                // I12. A change given up because Nest went on answering that it had not applied it has been sent
+                // as often as a change may be: once, and RESEND_MAX times again. (Per change, so for temperatures
+                // only: a mode or an eco setting comes back, and its sends are counted per value. Not for a change
+                // that is lost because it was no longer held, which is not sent again at all.)
+                if (givenUp && typeof commit.value == 'number' && commit.group.sends < 1 + RESEND_MAX) {
+                    world.violation('I12', 'change #' + commit.seq + ' (' + settingKey(commit) + '=' + JSON.stringify(commit.value) + ') is given up after ' + commit.group.sends + ' send(s)');
                 }
+                // (For I10. named: whether the line names the change by the key it was made with. In a single mode
+                // a threshold is sent, and named, as the target temperature)
+                world.dropped.push({ commit: commit, resend: /^Nest did not apply the change/.test(text), named: commit.key == key });
             });
         };
         // A line that says changes are sent again after a status 4: which ones (for I2: the next request carrying
@@ -624,11 +643,27 @@ function create(deps) {
         });
         // I1, I2: checked as each request goes out
         const send = (request, from) => {
+            // I13. The request's bytes hold the values of the changes it is taken to carry (a check of this test's
+            // own bookkeeping as much as of the plugin: where it can be told, a thermostat in range mode).
+            for (const entry of from.entries) {
+                const el = request.set.find(el => 'shared.' + el.id == entry.object && el.value.settings && el.value.settings.hvacMode == 'RANGE');
+                const wire = el && (entry.key == LOW ? el.value.settings.targetTemperatureHeat.value : entry.key == HIGH ? el.value.settings.targetTemperatureCool.value : undefined);
+                if (wire !== undefined && !same(wire, entry.value)) {
+                    // (P13: the same where the threshold was written while the accessory held a single mode and the
+                    // request is built for range mode: pushUpdates turns it into a target temperature, which a
+                    // range-mode request does not carry. It happens after a mode change was dropped by a failed
+                    // push; the threshold is then not sent at all. So it was before.)
+                    world.violation(entry.mode == 'range' ? 'I13' : 'P13', 'request ' + request.number + ' is taken to carry ' + entry.object + '/' + entry.key + '=' + entry.value + ', and its bytes hold ' + wire);
+                }
+            }
             for (const entry of from.entries) {
                 const commit = commitOf(entry, from.commits);
                 if (!commit) {
                     world.violation('I1', 'request ' + request.number + ' carries ' + entry.object + ' ' + entry.key + '=' + JSON.stringify(entry.value) + ', which no change asked for');
                     continue;
+                }
+                if (request.carries.includes(commit)) {
+                    continue; // (queued twice with the same value)
                 }
                 request.carries.push(commit);
                 const group = commit.group;
@@ -760,9 +795,16 @@ function create(deps) {
             }
             // I10. Once the log has said a change was NOT applied, it is no longer held. (P10: the same after a line
             // of the plugin's older paths.)
-            for (const { commit, resend } of world.dropped.splice(0)) {
+            for (const { commit, resend, named } of world.dropped.splice(0)) {
                 if (typeof commit.value == 'number' && conn.mergeUpdates.some(update => update.expiry_time > now && update.object.object_key == commit.object && exact(update.object.value[commit.key], commit.value))) {
-                    world.violation(resend ? 'I10' : 'P10', 'change #' + commit.seq + ' (' + settingKey(commit) + '=' + JSON.stringify(commit.value) + ') was said to be NOT applied, and is still held');
+                    if (named) {
+                        world.violation(resend ? 'I10' : 'P10', 'change #' + commit.seq + ' (' + settingKey(commit) + '=' + JSON.stringify(commit.value) + ') was said to be NOT applied, and is still held');
+                    } else {
+                        // P7, counted and not a failure: the line names a threshold as the target temperature it
+                        // was sent as, and the threshold stays held (and shown) until Nest's state is read, up to
+                        // 300 s later. So a threshold written in a single mode is held whatever becomes of it.
+                        world.violation('P7', 'change #' + commit.seq + ' (' + settingKey(commit) + '=' + JSON.stringify(commit.value) + ') was said to be NOT applied as a target temperature, and is still held');
+                    }
                 }
             }
             // (For I3: whether Nest has had the value of the last change made to each setting since a request
@@ -829,17 +871,18 @@ function create(deps) {
             // a newer change to the same setting, or the log says it was NOT applied.
             for (const commit of world.commits) {
                 if (!commit.accepted && !commit.dropped && !commit.reported && world.latest[settingKey(commit)] === commit) {
-                    // (P3: the same where the last request carrying the change failed, and not with a status 4: the
+                    // (P3: the same where the last request carrying the change failed, and not with a status 4, or
+                    // where it never went out because a failed push, queued again in front of it, wrote over it: the
                     // plugin's older paths. In a single mode a failed push is queued again as it was sent, as one
                     // target temperature, and a second threshold written with it is never sent.)
-                    world.violation(commit.last && commit.last != 'status4' ? 'P3' : 'I3', 'change #' + commit.seq + ' (' + settingKey(commit) + '=' + JSON.stringify(commit.value) + ', made at ' + (commit.at - start) / 1000 + ' s) was sent ' + commit.group.sends + ' time(s), never taken by Nest, and nothing says it was lost');
+                    world.violation((commit.last && commit.last != 'status4') || commit.overridden ? 'P3' : 'I3', 'change #' + commit.seq + ' (' + settingKey(commit) + '=' + JSON.stringify(commit.value) + ', made at ' + (commit.at - start) / 1000 + ' s) was sent ' + commit.group.sends + ' time(s), never taken by Nest, and nothing says it was lost');
                 }
             }
             // I2, at rest: the last value sent for a setting is the last one asked for, unless that was lost.
             for (const key in world.latest) {
                 const commit = world.latest[key], last = world.sent[key];
                 if (!commit.dropped && (!last || (last.seq != commit.seq && !same(last.value, commit.value)))) {
-                    world.violation(world.violations.some(el => el.invariant == 'P2') ? 'P2' : 'I2', 'the last change to ' + key + ' (#' + commit.seq + ', ' + JSON.stringify(commit.value) + ') is not the last value sent for it (' + (last ? '#' + last.seq + ', ' + JSON.stringify(last.value) : 'none') + ')');
+                    world.violation(world.violations.some(el => el.invariant == 'P2') || commit.overridden ? 'P2' : 'I2', 'the last change to ' + key + ' (#' + commit.seq + ', ' + JSON.stringify(commit.value) + ') is not the last value sent for it (' + (last ? '#' + last.seq + ', ' + JSON.stringify(last.value) : 'none') + ')');
                 }
             }
             // I4. HomeKit shows Nest's state. When messages can be lost, only after a new stream has delivered it.
