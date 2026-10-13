@@ -92,6 +92,22 @@ Differences from upstream:
   `Sent again`.
   To switch all of it off without a restart, create a file `nest-no-resend.on` in the Homebridge storage directory
   (looked for at each such answer): the answer is then taken as before, and one line says so.
+* **A Nest Temperature Sensor's newer reading is not replaced by an older one.** A sensor's temperature reaches the
+  plugin twice: with the REST API's long poll and on the observe stream. The stream is usually first (0.14 s after
+  the change against the REST API's 1-2 s), but one change in ten it delivers late, by up to 9 minutes. The plugin
+  keeps everything the stream has delivered and merges all of it over its current state after every stream message,
+  whatever the message is about, so the stream's older reading replaced the one the REST API had just delivered, at
+  the next message (there is one about every minute), until the stream delivered the change itself: HomeKit saw new,
+  old, new (14 times in 7 days on three sensors; the old value stood 21 s in the median, 9 minutes at most). Since
+  4.6.10-ha.9 a new reading from the REST API is also written into what the stream's data holds for that sensor, so
+  the merge re-asserts it; a stream message that carries the sensor's reading replaces it as before, a new stream's
+  first message (Nest's full current state) included. And a REST answer that carries the same reading as the REST
+  API's last is no longer taken as a reading (a sensor's whole object is sent whenever anything in it changes, and
+  can still hold the reading from before a change the stream has already delivered; the stream's merge used to put
+  that right at its next message; seen once in those 7 days). Only the sensors' temperature is handled so: a
+  thermostat's values reach the plugin from the stream alone. Not handled: a change either API delivers later than
+  the other delivered the change after it (not seen in those 7 days). Nothing new is logged, and no characteristic
+  properties change (no reload of Home Assistant's HomeKit Controller entry is needed for this version).
 * Errors are logged without the request headers (upstream could print Google cookies into the log).
 * **Raw observe-stream debug log (read-only).** While a file `nest-raw-debug.on` exists in the Homebridge storage
   directory (checked every 30 s, no restart needed), every observe stream frame and every trait of each Nest
