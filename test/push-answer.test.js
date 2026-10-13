@@ -116,19 +116,28 @@ module.exports = async function() {
         };
         const notSentAgain = (seconds, status) => 'info Nest did not apply the change shared.T1 {"target_temperature_low":21,"target_temperature_high":23} (status ' + (status || 4) + ' after ' + seconds + ' s) - not sending it again: nest-no-resend.on exists in ' + noResend + '.';
 
-        // An empty answer at normal speed. The first of its kind since the start is logged, as a sample; after that
-        // only with Debug.Verbose
+        // An empty answer at normal speed: logged at info level, every time. (Before 4.6.10-ha.9 only the first of its
+        // kind since the start, as a sample, and after that only with Debug.Verbose.)
         fresh(false);
         let run = await push({ data: Buffer.alloc(0) }, 3);
         assert.deepStrictEqual(run.left, expected);
         assert.deepStrictEqual(run.answered, ['info ' + CHANGE + '3 s: HTTP 200, 0 byte(s), empty.']);
         run = await push({ data: Buffer.alloc(0) }, 3);
         assert.deepStrictEqual(run.left, expected);
-        assert.deepStrictEqual(run.answered, [], 'nothing at info level for a normal answer');
+        assert.deepStrictEqual(run.answered, ['info ' + CHANGE + '3 s: HTTP 200, 0 byte(s), empty.'], 'at info level for a normal answer too');
         fresh(true);
         await push({ data: Buffer.alloc(0) }, 3);
         run = await push({ data: Buffer.alloc(0) }, 3);
-        assert.deepStrictEqual(run.answered, ['debug ' + CHANGE + '3 s: HTTP 200, 0 byte(s), empty.'], 'with Debug.Verbose');
+        assert.deepStrictEqual(run.answered, ['info ' + CHANGE + '3 s: HTTP 200, 0 byte(s), empty.'], 'and so with Debug.Verbose');
+        // (Those that would not have been logged go through conn.evidence: a version compared with one before
+        // 4.6.10-ha.9 can leave them out)
+        fresh(false);
+        await push({ data: Buffer.alloc(0) }, 3);
+        run = await push({ data: Buffer.alloc(0) }, 3, conn => {
+            conn.evidence = () => {};
+        });
+        assert.deepStrictEqual(run.left, expected);
+        assert.deepStrictEqual(run.answered, []);
 
         // Slow: logged every time
         fresh(false);
@@ -139,22 +148,24 @@ module.exports = async function() {
             assert.deepStrictEqual(run.answered, ['info ' + CHANGE + '25 s (slow): HTTP 200, 0 byte(s), empty.']);
         }
         run = await push({ data: Buffer.alloc(0) }, 9.9);
-        assert.deepStrictEqual(run.answered, []);
+        assert.deepStrictEqual(run.answered, ['info ' + CHANGE + '9.9 s: HTTP 200, 0 byte(s), empty.']);
         run = await push({ data: Buffer.alloc(0) }, 10);
         assert.strictEqual(run.answered.length, 1);
 
         // An answer as the plugin's schema guesses it (BatchTraitOperation: one operation per change, progress COMPLETE):
-        // logged once as a new kind, then quiet
+        // logged every time
         const operation = (progress, status) => bytes(1, Buffer.concat([bytes(1, bytes(1, 'DEVICE_T1')), varint(2, progress)].concat(status === undefined ? [] : [bytes(3, status)])));
         run = await push({ data: operation(4) }, 2);
         assert.deepStrictEqual(run.left, expected);
         assert.deepStrictEqual(run.answered, ['info ' + CHANGE + '2 s: HTTP 200, 17 byte(s), operation (progress 4, status none), starts 0a0f0a0b0a094445564943455f54311004.']);
         run = await push({ data: operation(4) }, 2);
-        assert.deepStrictEqual(run.answered, []);
-        // ... with an OK status (code 0 is not sent): a kind of its own, quiet the second time
-        await push({ data: operation(4, Buffer.alloc(0)) }, 2);
+        assert.deepStrictEqual(run.answered, ['info ' + CHANGE + '2 s: HTTP 200, 17 byte(s), operation (progress 4, status none), starts 0a0f0a0b0a094445564943455f54311004.']);
+        // ... with an OK status (code 0 is not sent): a kind of its own, the same the second time
+        const first = await push({ data: operation(4, Buffer.alloc(0)) }, 2);
         run = await push({ data: operation(4, Buffer.alloc(0)) }, 2);
-        assert.deepStrictEqual(run.answered, []);
+        assert.strictEqual(run.answered.length, 1);
+        assert.ok(/^info .* after 2 s: HTTP 200, 19 byte\(s\), operation \(progress 4, status 0\), starts /.test(run.answered[0]), run.answered[0]);
+        assert.deepStrictEqual(run.answered, first.answered);
 
         // A status other than 0, in an operation or as the observe stream sends one: logged every time, and the push is
         // still a success. No real answer has been seen: a body read wrongly must not make a landed write look failed.
@@ -196,7 +207,7 @@ module.exports = async function() {
         for (const answer of [{}, { data: null }, { data: '' }, { data: new ArrayBuffer(0) }, { data: new Uint8Array(0) }]) {
             run = await push(answer, 2);
             assert.deepStrictEqual(run.left, expected);
-            assert.deepStrictEqual(run.answered, [], 'empty, as seen before');
+            assert.deepStrictEqual(run.answered, ['info ' + CHANGE + '2 s: HTTP 200, 0 byte(s), empty.'], 'empty, as seen before');
         }
         run = await pushNoResend({ data: new Uint8Array([0x12, 0x02, 0x08, 0x04]) }, 2);
         assert.deepStrictEqual(run.left, Object.assign({}, expected, { other: [notSentAgain(2)] }));
@@ -209,14 +220,14 @@ module.exports = async function() {
         run = await push({ data: Buffer.alloc(0), status: 204 }, 2);
         assert.deepStrictEqual(run.left, expected);
 
-        // New kinds are logged as such only up to a limit (an answer that differs every time must not fill the log)
+        // One line per answer, however many kinds there are; the kinds are remembered only up to a limit
         fresh(false);
         let logged = 0;
         for (let i = 0; i < 40; i++) {
             run = await push({ data: Buffer.concat(Array.from({ length: i % 20 + 1 }, () => operation(4))).subarray(0, 17 * 8) }, 2);
             logged += run.answered.length;
         }
-        assert.ok(logged <= 16, 'logged ' + logged);
+        assert.strictEqual(logged, 40);
         assert.ok(conn.pushAnswerKinds.length <= 16);
 
         // Something going wrong while the answer is described or logged changes nothing: an answer whose data cannot
@@ -241,6 +252,13 @@ module.exports = async function() {
             conn.log = conn.verbose = failingLogger;
         });
         assert.deepStrictEqual(run.left, expected);
+        fresh(false);
+        await push({ data: Buffer.alloc(0) }, 2);
+        run = await push({ data: Buffer.alloc(0) }, 2, conn => {
+            conn.evidence = conn.verbose = failingLogger;
+        });
+        assert.deepStrictEqual(run.left, expected);
+        assert.deepStrictEqual(run.answered, []);
         fresh(false);
         run = await push({ data: Buffer.from([0x12, 0x02, 0x08, 0x0d]) }, 20, conn => {
             conn.logPushAnswer = () => {

@@ -13,6 +13,15 @@ const path = require('path');
 const twoInput = require('./two-input');
 
 const near = (a, b) => typeof a == 'number' && typeof b == 'number' && Math.abs(a - b) < 1e-6;
+
+// The lines 4.6.10-ha.9 logs about a sensor's REST object (the house starts at START; the stream's values are float32)
+const START = Date.UTC(2026, 9, 12, 17, 0, 0), f = Math.fround;
+const fieldsLine = (id, more) => 'Sensor ..' + id + ': the REST API\'s object has the fields object_key (string), object_revision (number), object_timestamp (number), value (object); value: current_temperature (number), battery_level (number)' +
+    (more === undefined ? ', where_id (string), serial_number (string), structure_id (string), last_updated_at (number)' : more) + '.';
+const readingLine = (id, value, seconds, done, had, stream, revision, more) => 'Sensor ..' + id + ': the REST API\'s reading ' + value + ' at ' + new Date(START + seconds * 1000).toISOString() + ', ' + done +
+    '; the current state had ' + had + ', the observe stream\'s copy ' + stream + '; object_revision ' + revision + ', object_timestamp ' + (START + seconds * 1000) + ', value.last_updated_at ' + START / 1000 + (more || '') + '.';
+const startLines = () => [['K1', 21.3, 3], ['K2', 20.4, 4], ['K3', 19.6, 5]].reduce((lines, [id, value, revision]) => lines.concat([fieldsLine(id), readingLine(id, value, 0, 'written', 'nothing', 'nothing', revision)]), []);
+const sensorLines = (h, id) => h.lines.filter(line => line.text.startsWith('Sensor ..' + id + ': the REST API\'s reading')).map(line => line.text);
 const nearAll = (values, expected, text) => assert.ok(values.length == expected.length && values.every((el, i) => near(el, expected[i])), text + ': ' + JSON.stringify(values) + ', expected ' + JSON.stringify(expected));
 
 module.exports = async function() {
@@ -51,7 +60,17 @@ module.exports = async function() {
             // The other sensors and the thermostats: nothing
             assert.deepStrictEqual(h.events.filter(el => el.id != 'K1').map(el => el.id + ' ' + el.name), ['T1 temperature']);
             assert.deepStrictEqual(h.problems, []);
-            assert.deepStrictEqual(h.lines, [], 'nothing is logged');
+            // The log: what the REST API's objects hold at the start, and its one reading since, with the plugin's
+            // clock, what the current state and the stream's copy held, and the object's own numbers. All at info
+            // level, and nothing else
+            assert.deepStrictEqual(h.lines.map(line => line.text), startLines().concat([
+                readingLine('K1', 20.8, 60, 'written', f(21.3), f(21.3), 6)
+            ]));
+            assert.ok(h.lines.every(line => line.level == 'info'));
+            // (Of the object's texts, its serial number, room, structure and user, none is in a line)
+            assert.ok(h.lines.every(line => !/SERIAL|WK\d|\bS1\b|user/.test(line.text)));
+            assert.strictEqual(h.lines[6].text, 'Sensor ..K1: the REST API\'s reading 20.8 at 2026-10-12T17:01:00.000Z, written; the current state had 21.299999237060547, the observe stream\'s copy 21.299999237060547; ' +
+                'object_revision 6, object_timestamp 1791824460000, value.last_updated_at 1791824400.');
             await h.close();
         }
 
@@ -114,8 +133,18 @@ module.exports = async function() {
             await h.rest('kryptonite.K1', { current_temperature: 19.1 });
             assert.ok(near(h.shown('K1'), 19.1));
             await h.frame(t.unrelated());
+            // (The object twice more with nothing new, and nothing to put right: counted, not logged. The second time
+            // after the stream has delivered the same reading, which it does as a float32)
+            await h.advance(1000);
+            await h.rest('kryptonite.K1', { battery_level: 98 });
+            await h.advance(500);
+            await h.frame(t.temperature('K1', 19.1));
+            assert.strictEqual(h.conn.currentState.kryptonite.K1.current_temperature, f(19.1));
+            await h.advance(500);
+            await h.rest('kryptonite.K1', { battery_level: 97 });
+            assert.ok(near(h.shown('K1'), 19.1));
             // ... and so is a reading it had before, when it has had another in between
-            await h.advance(60000);
+            await h.advance(58000);
             await h.rest('kryptonite.K1', { current_temperature: 19.6 });
             await h.frame(t.unrelated());
             assert.ok(near(h.shown('K1'), 19.6));
@@ -123,13 +152,36 @@ module.exports = async function() {
             // An object of a sensor the stream does not know, and one before the stream has delivered anything for
             // a sensor: taken as before, and the stream's own data is not added to
             assert.strictEqual(h.conn.protobufBody.kryptonite.K9, undefined);
-            h.restObjects['kryptonite.K9'] = { object_key: 'kryptonite.K9', object_revision: 0, object_timestamp: 0, value: { current_temperature: 18.2, battery_level: 100 } };
+            // (Its times are texts, and it has an id that is all digits: a text is logged only if it is a number or a date
+            // and time, and its field is named like a time)
+            h.restObjects['kryptonite.K9'] = { object_key: 'kryptonite.K9', object_revision: 0, object_timestamp: 0,
+                value: { current_temperature: 18.2, battery_level: 100, serial_number: '1234567890', last_updated_at: '2026-10-12T17:12:24.150Z', report_time: '1791825144', updated_by: 'user.12345' } };
             await h.rest('kryptonite.K9', {});
             await h.rest('kryptonite.K9', { current_temperature: 18.4 });
             assert.strictEqual(h.conn.currentState.kryptonite.K9.current_temperature, 18.4);
             assert.strictEqual(h.conn.protobufBody.kryptonite.K9, undefined, 'the stream\'s data has no sensor the stream did not deliver');
             assert.deepStrictEqual(h.problems, []);
-            assert.deepStrictEqual(h.lines, []);
+            // The log: a line for each reading that was news, one for the reading that was not and differed from what
+            // the current state held, none for the two that changed nothing (the next line counts them)
+            assert.deepStrictEqual(sensorLines(h, 'K1'), [
+                readingLine('K1', 21.3, 0, 'written', 'nothing', 'nothing', 3),
+                readingLine('K1', 20.3, 10, 'written', f(21.3), f(21.3), 6),
+                readingLine('K1', 20.3, 600.05, 'not written (the REST API\'s last again)', f(19.6), f(19.6), 7),
+                readingLine('K1', 19.6, 624.05, 'written', f(19.6), f(19.6), 8),
+                readingLine('K1', 19.1, 684.05, 'written', 19.6, 19.6, 9),
+                readingLine('K1', 19.6, 744.05, 'written', f(19.1), f(19.1), 12, '; 2 answer(s) with the reading before it again since the last line, the last with object_revision 11, object_timestamp ' + (START + 686050) +
+                    ', value.last_updated_at ' + START / 1000)
+            ]);
+            const unknown = h.lines.filter(line => /^Sensor \.\.K9: /.test(line.text)).map(line => line.text.replace(/ at \S+,/, ' at T,').replace(/object_timestamp \d+/, 'object_timestamp T'));
+            assert.deepStrictEqual(unknown, [
+                fieldsLine('K9', ', serial_number (string), last_updated_at (string), report_time (string), updated_by (string)'),
+                'Sensor ..K9: the REST API\'s reading 18.2 at T, written; the current state had nothing, the observe stream\'s copy nothing; object_revision 13, object_timestamp T, ' +
+                    'value.last_updated_at 2026-10-12T17:12:24.150Z, value.report_time 1791825144.',
+                'Sensor ..K9: the REST API\'s reading 18.4 at T, written; the current state had 18.2, the observe stream\'s copy nothing; object_revision 14, object_timestamp T, ' +
+                    'value.last_updated_at 2026-10-12T17:12:24.150Z, value.report_time 1791825144.'
+            ]);
+            assert.strictEqual(h.lines.length, 6 + 5 + 3);
+            assert.ok(h.lines.every(line => !/SERIAL|WK\d|\bS1\b|user|1234567890/.test(line.text)), 'no text of an object that is not a number or a time in a field named like one');
             await h.close();
         }
 
@@ -218,8 +270,64 @@ module.exports = async function() {
             assert.strictEqual(h.conn.mergeUpdates.length, 0, 'released by Nest\'s echo');
             await h.frame(t.unrelated());
             assert.ok(near(h.shown('T1', 'low'), 20) && near(h.shown('K1'), 20.8) && near(h.shown('K2'), 20.6));
+            // A second write: Nest's answer to each is in the log (before 4.6.10-ha.9 only the first of a kind)
+            await h.write('T1', 'low', 20.5);
+            await h.runTo(30);
+            await h.frame(t.setpoints('T1', { heat: 20.5, cool: 23 }));
+            assert.strictEqual(h.conn.mergeUpdates.length, 0);
+            assert.deepStrictEqual(h.lines.filter(line => /^Nest answered/.test(line.text)).map(line => line.level + ' ' + line.text), [
+                'info Nest answered the change shared.T1 {"target_temperature_low":20} after 0.3 s: HTTP 200, 0 byte(s), empty.',
+                'info Nest answered the change shared.T1 {"target_temperature_low":20.5} after 0.3 s: HTTP 200, 0 byte(s), empty.'
+            ]);
             assert.deepStrictEqual(h.problems, []);
             assert.deepStrictEqual(h.lines.filter(line => line.level != 'info'), []);
+            await h.close();
+        }
+
+        // The lines about the REST API's readings and about Nest's answers decide nothing: with a logger that throws
+        // at each of them everything is as without. And a sensor whose reading changes all the time does not fill
+        // the log: 30 lines in an hour, and the next line says how many were left out.
+        {
+            const h = await houses.open();
+            const t = h.traits;
+            h.conn.evidence = () => {
+                throw new Error('the logger failed');
+            };
+            await h.runTo(20);
+            await h.write('T1', 'low', 20);
+            await h.rest('kryptonite.K1', { current_temperature: 20.8 });
+            await h.frame(t.unrelated());
+            await h.runTo(26);
+            await h.frame(t.setpoints('T1', { heat: 20, cool: 23 }));
+            await h.write('T1', 'low', 20.5);
+            await h.runTo(32);
+            await h.frame(t.setpoints('T1', { heat: 20.5, cool: 23 }));
+            await h.rest('kryptonite.K1', { battery_level: 90 });
+            await h.rest('kryptonite.K1', { current_temperature: 20.3 });
+            await h.frame(t.unrelated());
+            assert.ok(near(h.shown('T1', 'low'), 20.5) && near(h.shown('K1'), 20.3));
+            assert.strictEqual(h.requests.length, 2);
+            assert.strictEqual(h.conn.mergeUpdates.length, 0);
+            assert.deepStrictEqual(h.problems, []);
+            assert.strictEqual(h.lines.filter(line => /^Sensor /.test(line.text)).length, 6, 'only the start\'s, logged before the logger was replaced');
+            await h.close();
+        }
+        {
+            const h = await houses.open();
+            await h.runTo(10);
+            for (let i = 0; i < 40; i++) {
+                await h.advance(10000);
+                await h.rest('kryptonite.K3', { current_temperature: 19 + (i % 2) / 10 });
+            }
+            assert.strictEqual(h.lines.filter(line => /^Sensor \.\.K3: /.test(line.text)).length, 30);
+            assert.strictEqual(sensorLines(h, 'K3').length, 29);
+            assert.ok(near(h.shown('K3'), 19.1), 'every reading was taken');
+            await h.advance(3600000);
+            await h.rest('kryptonite.K3', { current_temperature: 18.5 });
+            const last = sensorLines(h, 'K3').pop();
+            assert.ok(/reading 18\.5 at .*, written; the current state had 19\.1, the observe stream's copy 19\.1; .*; 12 line\(s\) left out\.$/.test(last), last);
+            assert.strictEqual(h.lines.filter(line => /^Sensor \.\.K[12]: /.test(line.text)).length, 4);
+            assert.deepStrictEqual(h.problems, []);
             await h.close();
         }
     } finally {

@@ -69,9 +69,10 @@ Differences from upstream:
 * **Nest's answer to each change is logged.** Nest answers 2xx to changes it then does not apply (six of ~300
   setpoint writes in four days, each apparently answered only after 15-33 s), and the plugin did not look at the
   answer. With one exception (the next item) it decides nothing from it, but logs how long the answer took, the HTTP
-  status, the size of the body, the status codes and progress values found in it, and its first 32 bytes in hex: at
-  info level when it took 10 s or more, carried a status other than 0, could not be read, or is of a kind not seen
-  since the plugin started; otherwise only with `"Debug.Verbose"`. Look for `Nest answered the change`.
+  status, the size of the body, the status codes and progress values found in it, and its first 32 bytes in hex, at
+  info level, one line per request: look for `Nest answered the change`. (Before 4.6.10-ha.9 only when it took 10 s
+  or more, carried a status other than 0, could not be read, or was of a kind not seen since the plugin started;
+  otherwise only with `"Debug.Verbose"`.)
 * **A change Nest answers as not applied is sent again, once.** The first two lost writes whose answers were logged
   (2026-10-11) were both answered with HTTP 200 and a body that is nothing but a status: after 15.6 s with a status
   4 (four bytes, no text), and after 20.4 s with a status 7 and the text "authentication failed" (27 bytes; nothing
@@ -106,8 +107,31 @@ Differences from upstream:
   can still hold the reading from before a change the stream has already delivered; the stream's merge used to put
   that right at its next message; seen once in those 7 days). Only the sensors' temperature is handled so: a
   thermostat's values reach the plugin from the stream alone. Not handled: a change either API delivers later than
-  the other delivered the change after it (not seen in those 7 days). Nothing new is logged, and no characteristic
-  properties change (no reload of Home Assistant's HomeKit Controller entry is needed for this version).
+  the other delivered the change after it (not seen in those 7 days). No characteristic properties change (no reload
+  of Home Assistant's HomeKit Controller entry is needed for this version).
+* **4.6.10-ha.9 logs two more things at info level, to collect evidence. Neither means trouble, and nothing is
+  decided from either.**
+  *Nest's answer to every change*, one line per request (see above; it used to be logged only when unusual):
+  `Nest answered the change shared.<thermostat> {"target_temperature_low":19.4,"target_temperature_high":22.2} after
+  1.9 s: HTTP 200, 113 byte(s), operation (progress none, status none), status 0, starts 0a6d0a6b...` is a normal
+  answer. `(slow)` after the seconds marks 10 s or more; a `status 4` or `status 7` is followed by the lines of the
+  item on sending again. Together with `Nest has not echoed ...`, `Nest's current state is ... not our ...`, `Nest's
+  current state confirms our change ...` and `Sent again, the change ...`, which name the same thermostat object and
+  values, the log now says for every change what Nest answered and whether Nest then reported it.
+  *Each reading the REST API delivers for a Nest Temperature Sensor*, when it is news or when it is left out although
+  the current state holds another: `Sensor ..10D3: the REST API's reading 20.8 at 2026-10-13T00:13:00.251Z, written;
+  the current state had 21.299999237060547, the observe stream's copy 21.299999237060547; object_revision 123,
+  object_timestamp 1791850379416.` The sensor is named by the last four characters of its id; the time is the
+  plugin's clock (Homebridge's log has seconds only); the numbers at the end are the REST object's own (every field
+  of the object that is a number, and the fields of the object and of its value that are named like a time or a
+  revision), for comparing the REST API's clock with the observe stream's. `not written (the REST API's last again)`
+  is the item above at work. An answer that carries a sensor's object with the reading the current state already has
+  is counted, not logged, and the next line says how many there were (`3 answer(s) with the reading before it again
+  since the last line, the last with ...`). Once per sensor and start a line lists the names and types of the
+  object's fields (`Sensor ..10D3: the REST API's object has the fields ...`), no values; of an object's texts only
+  one that is a number or a date and time, in a field named like a time, is ever logged. So: six lines at each
+  start, then one per change of a sensor's reading (a few dozen a day per sensor), and never more than 30 per sensor
+  in an hour (`N line(s) left out` in the next one).
 * Errors are logged without the request headers (upstream could print Google cookies into the log).
 * **Raw observe-stream debug log (read-only).** While a file `nest-raw-debug.on` exists in the Homebridge storage
   directory (checked every 30 s, no restart needed), every observe stream frame and every trait of each Nest
